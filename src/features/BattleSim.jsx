@@ -366,7 +366,7 @@ function TeamSlot({ slot, onChange, onRemove }) {
 
   return (
     <div style={{ borderTop: "1px solid var(--rule)", paddingTop: 8, marginBottom: 10 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "start", marginBottom: 6 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
         <PokemonSelect list={POKEDEX} style={{ flex: 1 }} value={slot.pokemonId}
                        onChange={(id) => onChange({ pokemonId: id })} />
         <input className="fld" style={{ width: 64 }} type="number" min="1" max="100"
