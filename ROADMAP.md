@@ -15,8 +15,10 @@ and is the single biggest remaining piece of work.
 screens.** The modifier chain in `battle.js` has an `other` parameter ready for
 them; nothing feeds it yet.
 
-**No bracket structure.** Battles are logged flat. There's no tournament tree,
-no badge tracking, no season concept.
+**One tourney format.** The league has a single-elimination knockout tourney
+(added 2026-08: each trainer fights with one league Pokémon at level 50, with
+manual/auto matches and an optional pass-the-device secret pick round). There's
+still no round-robin, no badge tracking, no season concept.
 
 ## In progress: the battle sim
 
