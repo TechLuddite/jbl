@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Junior Battle Lab — a Pokemon stats and battle companion",
+  "description": "Joseph's Battle Lab — a Pokemon stats and battle companion",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -1,4 +1,4 @@
-# Junior Battle Lab
+# Joseph's Battle Lab
 
 A Pokémon damage calculator, stat explorer, and family league tracker.
 

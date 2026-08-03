@@ -27,7 +27,7 @@ export default function App() {
             <span className="dot" style={{ background: "#5FBF63" }} />
           </div>
           <div style={{ marginLeft: "auto", textAlign: "right" }}>
-            <div className="wordmark">Junior Battle Lab</div>
+            <div className="wordmark">Joseph's Battle Lab</div>
             <div className="tag">
               {POKEDEX.length} Pokémon · {usingFullDex ? "full dex" : "sample dex"}
             </div>

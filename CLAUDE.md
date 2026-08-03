@@ -1,4 +1,4 @@
-# CLAUDE.md — Junior Battle Lab
+# CLAUDE.md — Joseph's Battle Lab
 
 ## What this is
 
