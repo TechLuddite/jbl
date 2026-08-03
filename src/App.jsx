@@ -1,11 +1,13 @@
 import React, { useState } from "react";
 import DamageCalc from "./features/DamageCalc.jsx";
+import BattleSim from "./features/BattleSim.jsx";
 import League from "./features/League.jsx";
 import StatDex from "./features/StatDex.jsx";
 import { usingFullDex, POKEDEX } from "./data/index.js";
 
 const TABS = [
   ["calc", "Damage", DamageCalc],
+  ["battle", "Battle", BattleSim],
   ["league", "League", League],
   ["dex", "Stats", StatDex],
 ];
