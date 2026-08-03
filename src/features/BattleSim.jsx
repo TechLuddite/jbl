@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { POKEDEX, legalMoves } from "../data/index.js";
 import {
-  createBattler, createBattle, playTurn, replaceFainted,
-  makeRng, chooseAiAction,
+  createBattler, createBattle, playTurn, replaceFainted, openBattle,
+  makeRng, chooseAiAction, ITEMS, ABILITIES,
 } from "../lib/sim.js";
 import { TypeChip, Field } from "../components.jsx";
 import * as storage from "../lib/storage.js";
@@ -28,8 +28,26 @@ function defaultMoveNames(pokemon) {
 
 function newSlot(pokemonId) {
   const p = POKEDEX.find((x) => x.id === pokemonId) ?? POKEDEX[0];
-  return { pokemonId: p.id, level: 50, moveNames: defaultMoveNames(p) };
+  // With the full dex baked, default to the Pokémon's real first ability.
+  const ability = p.abilities?.[0]?.slug ?? "";
+  return { pokemonId: p.id, level: 50, moveNames: defaultMoveNames(p), item: "", ability };
 }
+
+/** Ability choices for a slot: the dex entry's real ones, or the whole
+ *  curated list on the sample set (u-pick spirit). */
+function abilityOptions(p) {
+  if (p.abilities?.length) {
+    return p.abilities.map((a) => ({
+      slug: a.slug,
+      label: (ABILITIES[a.slug]?.name ?? titleish(a.slug)) +
+        (a.hidden ? " (hidden)" : "") +
+        (ABILITIES[a.slug] ? "" : " · not in sim yet"),
+    }));
+  }
+  return Object.entries(ABILITIES).map(([slug, a]) => ({ slug, label: a.name }));
+}
+
+const titleish = (slug) => slug.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 
 const dexOf = (slot) => POKEDEX.find((p) => p.id === slot.pokemonId) ?? POKEDEX[0];
 
@@ -81,12 +99,17 @@ export default function BattleSim() {
           .map((n) => legal.find((m) => m.name === n))
           .filter(Boolean)
           .slice(0, 4);
-        return createBattler(p, { level: slot.level, moves });
+        return createBattler(p, {
+          level: slot.level, moves,
+          item: slot.item || null,
+          ability: slot.ability || null,
+        });
       })
     );
     rngRef.current = makeRng(Date.now() >>> 0);
-    setBattle(createBattle(built[0], built[1]));
-    setLog([]);
+    const opened = openBattle(createBattle(built[0], built[1]));
+    setBattle(opened.state);
+    setLog(opened.events.length ? [{ turn: 0, events: opened.events }] : []);
     setChosen([{ type: "move", moveIndex: 0 }, { type: "move", moveIndex: 0 }]);
     setRecorded(false);
     setPhase("fight");
@@ -102,12 +125,16 @@ export default function BattleSim() {
   }
 
   /** Auto-fill replacements for sides the sim controls (first healthy pick). */
-  function settleAiReplacements(state) {
+  function settleAiReplacements(state, events) {
     let s = state;
     for (const side of [0, 1]) {
       if (s.pendingReplacement[side] && auto[side]) {
         const next = s.teams[side].battlers.findIndex((b) => b.hp > 0);
-        if (next >= 0) s = replaceFainted(s, side, next).state;
+        if (next >= 0) {
+          const r = replaceFainted(s, side, next);
+          s = r.state;
+          events.push({ type: "sendIn", side, name: s.teams[side].battlers[next].pokemon.name }, ...r.events);
+        }
       }
     }
     return s;
@@ -118,8 +145,9 @@ export default function BattleSim() {
       auto[side] ? chooseAiAction(state, side, rngRef.current) : picks[side]
     );
     const r = playTurn(state, actions, rngRef.current);
-    const next = settleAiReplacements(r.state);
-    setLog((prev) => [{ turn: state.turn, events: r.events }, ...prev]);
+    const events = [...r.events];
+    const next = settleAiReplacements(r.state, events);
+    setLog((prev) => [{ turn: state.turn, events }, ...prev]);
     return next;
   }
 
@@ -134,17 +162,22 @@ export default function BattleSim() {
     const blocks = [];
     let guard = 0;
     while (s.winner == null && guard++ < MAX_TURNS) {
+      const entryEvents = [];
       if (s.pendingReplacement.some(Boolean)) {
         for (const side of [0, 1]) {
           if (s.pendingReplacement[side]) {
             const next = s.teams[side].battlers.findIndex((b) => b.hp > 0);
-            if (next >= 0) s = replaceFainted(s, side, next).state;
+            if (next >= 0) {
+              const r = replaceFainted(s, side, next);
+              s = r.state;
+              entryEvents.push({ type: "sendIn", side, name: s.teams[side].battlers[next].pokemon.name }, ...r.events);
+            }
           }
         }
       }
       const actions = [0, 1].map((side) => chooseAiAction(s, side, rngRef.current));
       const r = playTurn(s, actions, rngRef.current);
-      blocks.push({ turn: s.turn, events: r.events });
+      blocks.push({ turn: s.turn, events: [...entryEvents, ...r.events] });
       s = r.state;
     }
     setLog((prev) => [...blocks.reverse(), ...prev]);
@@ -155,6 +188,8 @@ export default function BattleSim() {
     const r = replaceFainted(battle, side, index);
     if (r.ok) {
       setBattle(r.state);
+      const name = r.state.teams[side].battlers[index].pokemon.name;
+      setLog((prev) => [{ turn: `${battle.turn}·in`, events: [{ type: "sendIn", side, name }, ...r.events] }, ...prev]);
       setChosen((prev) => prev.map((c, s) => (s === side ? { type: "move", moveIndex: 0 } : c)));
     }
   }
@@ -222,9 +257,15 @@ export default function BattleSim() {
 
   const state = battle;
   const over = state.winner != null;
+  const weatherLabel = { rain: "Rain", sun: "Harsh sunlight", sand: "Sandstorm", snow: "Snow" }[state.weather.kind];
 
   return (
     <div>
+      {weatherLabel && (
+        <div className="mono" style={{ fontSize: 11, marginBottom: 8, color: "var(--ink-soft)" }}>
+          ☁ {weatherLabel} · {state.weather.turns} more turn{state.weather.turns === 1 ? "" : "s"}
+        </div>
+      )}
       <div className="duel">
         {[0, 1].map((side) => (
           <SidePanel
@@ -305,10 +346,10 @@ export default function BattleSim() {
 
       <div className="eyebrow" style={{ marginTop: 18 }}>Battle log · newest first</div>
       {log.length === 0 && <div className="empty">Pick actions and play the first turn.</div>}
-      {log.map((block) => (
-        <div key={block.turn} className="step">
-          <div className="step-label">Turn {block.turn}</div>
-          {block.events.map((e, i) => <EventLine key={i} e={e} />)}
+      {log.map((block, i) => (
+        <div key={`${i}-${block.turn}`} className="step">
+          <div className="step-label">{block.turn === 0 ? "Battle start" : `Turn ${block.turn}`}</div>
+          {block.events.map((e, j) => <EventLine key={j} e={e} />)}
         </div>
       ))}
     </div>
@@ -340,6 +381,22 @@ function TeamSlot({ slot, onChange, onRemove }) {
         <span className="mono" style={{ fontSize: 10, color: "var(--ink-soft)" }}>
           {legal.length} moves to pick from
         </span>
+      </div>
+      <div style={{ display: "grid", gap: 4, gridTemplateColumns: "1fr 1fr", marginBottom: 6 }}>
+        <select className="fld" title="Held item" value={slot.item}
+                onChange={(e) => onChange({ item: e.target.value })}>
+          <option value="">— no item —</option>
+          {Object.entries(ITEMS).map(([slug, it]) => (
+            <option key={slug} value={slug} title={it.desc}>{it.name}</option>
+          ))}
+        </select>
+        <select className="fld" title="Ability" value={slot.ability}
+                onChange={(e) => onChange({ ability: e.target.value })}>
+          <option value="">— no ability —</option>
+          {abilityOptions(p).map((o) => (
+            <option key={o.slug} value={o.slug}>{o.label}</option>
+          ))}
+        </select>
       </div>
       <div style={{ display: "grid", gap: 4, gridTemplateColumns: "1fr 1fr" }}>
         {[0, 1, 2, 3].map((i) => (
@@ -381,6 +438,19 @@ function SidePanel({ state, side, isAuto, chosen, onChoose, onReplace, over }) {
     .map(([k, v]) => `${k.toUpperCase()} ${v > 0 ? "+" : ""}${v}`)
     .join(" · ");
 
+  const hz = team.hazards;
+  const hazardText = [
+    hz.stealthRock && "rocks",
+    hz.spikes > 0 && `spikes ×${hz.spikes}`,
+    hz.toxicSpikes > 0 && `toxic spikes ×${hz.toxicSpikes}`,
+    hz.stickyWeb && "sticky web",
+  ].filter(Boolean).join(" · ");
+
+  const kitText = [
+    b.item && ITEMS[b.item] ? ITEMS[b.item].name : null,
+    b.ability && ABILITIES[b.ability] ? ABILITIES[b.ability].name : null,
+  ].filter(Boolean).join(" · ");
+
   return (
     <div className="card">
       <div className="eyebrow">{SIDE_NAMES[side]}{isAuto ? " · sim plays" : ""}</div>
@@ -398,7 +468,9 @@ function SidePanel({ state, side, isAuto, chosen, onChoose, onReplace, over }) {
             <div className="track"><div className="bar" style={{ width: `${Math.max(0, pct)}%`, background: barColor }} /></div>
             <span className="mono" style={{ fontSize: 12 }}>{b.hp}/{b.maxHP}</span>
           </div>
+          {kitText && <div className="mono" style={{ fontSize: 10, color: "var(--ink-soft)", marginTop: 2 }}>{kitText}</div>}
           {stageText && <div className="mono" style={{ fontSize: 10, color: "var(--ink-soft)", marginTop: 2 }}>{stageText}</div>}
+          {hazardText && <div className="mono" style={{ fontSize: 10, color: "var(--amber)", marginTop: 2 }}>on this side: {hazardText}</div>}
         </div>
       </div>
 
@@ -515,6 +587,19 @@ function EventLine({ e }) {
     case "noPP": return <div className="step-body">{e.name} has no PP left for that move.</div>;
     case "noEffect": return <div className="step-body">It didn't do anything.</div>;
     case "notModeled": return <div className="step-body">{e.move} isn't in the sim yet, so nothing happened.</div>;
+    case "sendIn": return <div className="step-body">{SIDE_NAMES[e.side]} sent in <strong>{e.name}</strong>.</div>;
+    case "weather": {
+      const text = { rain: "It started to rain!", sun: "The sunlight turned harsh!", sand: "A sandstorm kicked up!", snow: "It started to snow!" }[e.kind];
+      return <div className="step-body">{text}</div>;
+    }
+    case "weatherEnd": return <div className="step-body">The weather cleared up.</div>;
+    case "hazard": return <div className="step-body">{e.name} was hurt by {e.hazard} for {e.amount} → {e.hpLeft}/{e.maxHP} HP</div>;
+    case "hazardSet": return <div className="step-body">{e.hazard} scattered around {SIDE_NAMES[e.side]}'s side!</div>;
+    case "hazardClear": return <div className="step-body">{e.by} cleared {e.hazard === "everything" ? "the hazards" : e.hazard} away.</div>;
+    case "ability": return <div className="step-body">{e.name}'s {e.ability}!</div>;
+    case "absorb": return <div className="step-body">{e.name}'s {e.ability} soaked up the move{e.amount ? ` and healed ${e.amount} HP` : ""}.</div>;
+    case "endure": return <div className="step-body">{e.name} hung on at 1 HP thanks to its {e.via}!</div>;
+    case "balloonPop": return <div className="step-body">{e.name}'s Air Balloon popped!</div>;
     default: return null;
   }
 }

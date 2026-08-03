@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  createBattler, createBattle, playTurn, replaceFainted,
+  createBattler, createBattle, playTurn, replaceFainted, openBattle,
   makeRng, stageMult, effectiveSpeed, chooseAiAction,
 } from "./sim.js";
 
@@ -485,5 +485,315 @@ describe("makeRng", () => {
     const b = makeRng(42);
     expect([a.next(), a.int(100), a.rollIndex()])
       .toEqual([b.next(), b.int(100), b.rollIndex()]);
+  });
+});
+
+/* ---------------------------------------------------------- slice 2 ------ */
+
+const rainDance = () => move({
+  slug: "rain-dance", name: "Rain Dance", type: "water", power: null,
+  category: "status", accuracy: null, target: "users-field",
+});
+const sunnyDay = () => move({
+  slug: "sunny-day", name: "Sunny Day", type: "fire", power: null,
+  category: "status", accuracy: null, target: "users-field",
+});
+
+describe("weather", () => {
+  it("rain boosts water 1.5× and sun halves it", () => {
+    // Non-STAB neutral 37: rain → floor(37*1.5) = 55; sun → floor(37*0.5) = 18.
+    const water = move({ slug: "surf", name: "Surf", type: "water" });
+    const { state } = duel({ aMon: { types: ["normal"] }, aMoves: [rainDance(), water, sunnyDay()], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "weather" && e.kind === "rain")).toBe(true);
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(55);
+    const t3 = playTurn(t2.state, [{ type: "move", moveIndex: 2 }, attack], scriptRng());
+    const t4 = playTurn(t3.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t4.events.find((e) => e.type === "damage").amount).toBe(18);
+  });
+
+  it("sandstorm chips 1/16 from both, but not rock/ground/steel", () => {
+    const sand = move({ slug: "sandstorm", name: "Sandstorm", type: "rock", power: null, category: "status", accuracy: null, target: "users-field" });
+    const { state } = duel({ aMoves: [sand], bMon: { types: ["rock"] }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    const chips = events.filter((e) => e.type === "chip");
+    // floor(175/16) = 10 for normal-type Alpha; rock-type Beta is untouched.
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toMatchObject({ name: "Alpha", cause: "sandstorm", amount: 10 });
+  });
+
+  it("sand gives rock types 1.5× Sp. Def", () => {
+    // Special 80 into floor(120*1.5)=180 SpD: floor(floor(22*80*120/180)/50)+2
+    // = floor(1173/50)+2 = 25. Psychic vs rock is neutral.
+    const sand = move({ slug: "sandstorm", name: "Sandstorm", type: "rock", power: null, category: "status", accuracy: null, target: "users-field" });
+    const psy = move({ slug: "psyshot", name: "Psyshot", type: "psychic", category: "special" });
+    const { state } = duel({ aMoves: [sand, psy], bMon: { types: ["rock"] }, bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(25);
+  });
+
+  it("weather runs out after five turns", () => {
+    const { state } = duel({ aMoves: [rainDance(), swordsDance()], bMoves: [swordsDance()] });
+    let s = playTurn(state, [attack, attack], scriptRng()).state;
+    for (let i = 0; i < 3; i++) {
+      const r = playTurn(s, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+      expect(r.state.weather.kind).toBe("rain");
+      s = r.state;
+    }
+    const last = playTurn(s, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(last.events.some((e) => e.type === "weatherEnd")).toBe(true);
+    expect(last.state.weather.kind).toBeNull();
+  });
+});
+
+describe("entry hazards", () => {
+  const rocks = () => move({ slug: "stealth-rock", name: "Stealth Rock", type: "rock", power: null, category: "status", accuracy: null });
+  const spikes = () => move({ slug: "spikes", name: "Spikes", type: "ground", power: null, category: "status", accuracy: null });
+  const tSpikes = () => move({ slug: "toxic-spikes", name: "Toxic Spikes", type: "poison", power: null, category: "status", accuracy: null });
+
+  function twoOnBench(bMon2 = {}) {
+    const a = createBattler(
+      mon({ name: "Alpha", stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }),
+      { moves: [rocks(), spikes(), tSpikes(), swordsDance()] }
+    );
+    const b1 = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    const b2 = createBattler(mon({ id: 3, name: "Gamma", ...bMon2 }), { moves: [swordsDance()] });
+    return createBattle([a], [b1, b2]);
+  }
+
+  it("Stealth Rock takes 1/8, scaled by rock weakness", () => {
+    // Neutral Gamma: floor(175/8) = 21.
+    const s0 = twoOnBench();
+    const t1 = playTurn(s0, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "hazardSet" && e.hazard === "Stealth Rock")).toBe(true);
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 3 }, { type: "switch", to: 1 }], scriptRng());
+    const hz = t2.events.find((e) => e.type === "hazard");
+    expect(hz).toMatchObject({ name: "Gamma", hazard: "Stealth Rock", amount: 21 });
+  });
+
+  it("Stealth Rock hurts a 4×-weak switcher for half its HP", () => {
+    // Fire/flying: rock is 2×2 = 4× → floor(175*4/8) = 87.
+    const s0 = twoOnBench({ types: ["fire", "flying"] });
+    const t1 = playTurn(s0, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 3 }, { type: "switch", to: 1 }], scriptRng());
+    expect(t2.events.find((e) => e.type === "hazard").amount).toBe(87);
+  });
+
+  it("Spikes ignore flyers; Toxic Spikes poison grounded switchers", () => {
+    const s0 = twoOnBench({ types: ["flying"] });
+    // Lay spikes and toxic spikes over two turns.
+    const t1 = playTurn(s0, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 2 }, attack], scriptRng());
+    // Flying Gamma comes in: no spikes damage, no poison.
+    const t3 = playTurn(t2.state, [{ type: "move", moveIndex: 3 }, { type: "switch", to: 1 }], scriptRng());
+    expect(t3.events.some((e) => e.type === "hazard")).toBe(false);
+    expect(t3.state.teams[1].battlers[1].status).toBeNull();
+    // Grounded Beta comes back in: floor(175/8) = 21 and poisoned.
+    const t4 = playTurn(t3.state, [{ type: "move", moveIndex: 3 }, { type: "switch", to: 0 }], scriptRng());
+    expect(t4.events.find((e) => e.type === "hazard")).toMatchObject({ name: "Beta", amount: 21 });
+    expect(t4.state.teams[1].battlers[0].status).toBe("poison");
+  });
+
+  it("a grounded poison type soaks up Toxic Spikes", () => {
+    const s0 = twoOnBench({ types: ["poison"] });
+    const t1 = playTurn(s0, [{ type: "move", moveIndex: 2 }, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 3 }, { type: "switch", to: 1 }], scriptRng());
+    expect(t2.events.some((e) => e.type === "hazardClear")).toBe(true);
+    expect(t2.state.teams[1].hazards.toxicSpikes).toBe(0);
+    expect(t2.state.teams[1].battlers[1].status).toBeNull();
+  });
+});
+
+describe("held items", () => {
+  it("Leftovers heals 1/16 at end of turn", () => {
+    const { a, b } = duel({ aMoves: [swordsDance()], aOpts: { item: "leftovers" } });
+    a.hp = 100;
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    // floor(175/16) = 10... after Beta's STAB 55 hit, then +10 at end of turn.
+    const heal = events.find((e) => e.type === "heal" && e.via === "Leftovers");
+    expect(heal.amount).toBe(10);
+  });
+
+  it("Sitrus Berry heals 1/4 once, below half HP", () => {
+    const { a, b } = duel({ aMoves: [swordsDance()], aOpts: { item: "sitrus-berry" } });
+    a.hp = 80; // under 87.5
+    const state = createBattle([a], [b]);
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    // floor(175/4) = 43. Beta hit for 55 first: 80-55=25, then +43 = 68.
+    expect(events.find((e) => e.type === "heal" && e.via === "Sitrus Berry").amount).toBe(43);
+    expect(s2.teams[0].battlers[0].item).toBeNull();
+  });
+
+  it("Choice Band boosts to floor(120*1.5)=180 Atk and locks the move", () => {
+    // Non-STAB neutral: floor(floor(22*80*180/120)/50)+2 = floor(2640/50)+2 = 54.
+    const second = move({ slug: "second", name: "Second", power: 40 });
+    const { state } = duel({
+      aMon: { types: ["water"] },
+      aMoves: [move(), second],
+      aOpts: { item: "choice-band" },
+      bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(54);
+    // Ask for move 1; the Band says no — Test Hit again.
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "move" && e.name === "Alpha").move).toBe("Test Hit");
+    expect(t2.state.teams[0].battlers[0].moves[0].pp).toBe(23);
+  });
+
+  it("Choice Scarf outruns a faster Pokémon", () => {
+    // Beta 120 Spe × 1.5 = 180 beats Alpha's 130.
+    const { state } = duel({ bOpts: { item: "choice-scarf" } });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.filter((e) => e.type === "move")[0].name).toBe("Beta");
+  });
+
+  it("Life Orb: 1.3× damage, 1/10 max HP per attack", () => {
+    // floor(37*1.3) = 48; recoil floor(175/10) = 17.
+    const { state } = duel({ aMon: { types: ["water"] }, aOpts: { item: "life-orb" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(48);
+    expect(events.find((e) => e.type === "recoil").amount).toBe(17);
+  });
+
+  it("Expert Belt: 1.2× only on super effective hits", () => {
+    // Fighting vs normal: 37 → eff 74 → belt floor(74*1.2) = 88.
+    const { state } = duel({ aMoves: [move({ type: "fighting" })], aOpts: { item: "expert-belt" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(88);
+  });
+
+  it("Focus Sash keeps a full-HP Pokémon at 1, then is spent", () => {
+    // Fighting-type STAB 150 power vs normal: base floor(3300/50)+2 = 68,
+    // STAB floor(68*1.5) = 102, eff ×2 = 204 ≥ 175 → sash holds at 1 HP.
+    const nuke = move({ slug: "nuke", name: "Nuke", type: "fighting", power: 150 });
+    const { state } = duel({ aMon: { types: ["fighting"] }, aMoves: [nuke], bOpts: { item: "focus-sash" }, bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "endure" && e.via === "Focus Sash")).toBe(true);
+    expect(s2.teams[1].battlers[0].hp).toBe(1);
+    expect(s2.teams[1].battlers[0].item).toBeNull();
+  });
+
+  it("Air Balloon floats over Ground moves until popped", () => {
+    const quake = move({ slug: "quake", name: "Quake", type: "ground" });
+    const pop = move({ slug: "pop", name: "Pop", power: 40 });
+    const { state } = duel({ aMoves: [quake, pop], bOpts: { item: "air-balloon" }, bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "immune")).toBe(true);
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "balloonPop")).toBe(true);
+    const t3 = playTurn(t2.state, [attack, attack], scriptRng());
+    expect(t3.events.some((e) => e.type === "damage" && e.move === "Quake")).toBe(true);
+  });
+});
+
+describe("abilities", () => {
+  it("Intimidate drops the foe's Attack on entry", () => {
+    const { a, b } = duel({ aOpts: { ability: "intimidate" } });
+    const opened = openBattle(createBattle([a], [b]));
+    expect(opened.events.some((e) => e.type === "ability" && e.ability === "Intimidate")).toBe(true);
+    expect(opened.state.teams[1].battlers[0].stages.atk).toBe(-1);
+  });
+
+  it("Drizzle sets rain from the doorway", () => {
+    const { a, b } = duel({ aOpts: { ability: "drizzle" } });
+    const opened = openBattle(createBattle([a], [b]));
+    expect(opened.state.weather).toEqual({ kind: "rain", turns: 5 });
+  });
+
+  it("Levitate blanks Ground moves", () => {
+    const quake = move({ slug: "quake", name: "Quake", type: "ground" });
+    const { state } = duel({ aMoves: [quake], bOpts: { ability: "levitate" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "immune")).toBe(true);
+    expect(events.some((e) => e.type === "damage")).toBe(false);
+  });
+
+  it("Huge Power doubles Attack: 37 becomes 72", () => {
+    // atk 240: floor(floor(22*80*240/120)/50)+2 = 72 (non-STAB, neutral).
+    const { state } = duel({ aMon: { types: ["water"] }, aOpts: { ability: "huge-power" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(72);
+  });
+
+  it("Guts turns burn into a boost: 1.5× Atk and no halving", () => {
+    // atk floor(120*1.5)=180 → 54 non-STAB; without Guts burn would halve it.
+    const { a, b } = duel({ aMon: { types: ["water"] }, aOpts: { ability: "guts" }, bMoves: [swordsDance()] });
+    a.status = "burn";
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(54);
+    // The burn itself still chips 10.
+    expect(events.find((e) => e.type === "chip").amount).toBe(10);
+  });
+
+  it("Water Absorb drinks the hit and heals a quarter", () => {
+    const surf = move({ slug: "surf", name: "Surf", type: "water" });
+    const { a, b } = duel({ aMoves: [surf], bOpts: { ability: "water-absorb" }, bMoves: [swordsDance()] });
+    b.hp = 100;
+    const state = createBattle([a], [b]);
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    // floor(175/4) = 43 → 143.
+    expect(events.find((e) => e.type === "absorb").amount).toBe(43);
+    expect(s2.teams[1].battlers[0].hp).toBe(143);
+  });
+
+  it("Magic Guard ignores every indirect drip", () => {
+    const { a, b } = duel({ aOpts: { ability: "magic-guard" }, aMoves: [swordsDance()], bMoves: [swordsDance()] });
+    a.status = "poison";
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "chip")).toBe(false);
+  });
+
+  it("Speed Boost climbs one stage per turn", () => {
+    const { state } = duel({ aOpts: { ability: "speed-boost" }, aMoves: [swordsDance()], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[0].battlers[0].stages.spe).toBe(1);
+  });
+
+  it("Technician: 60 power reads as 90", () => {
+    // floor(floor(22*90*120/120)/50)+2 = 41 (non-STAB, neutral).
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [move({ power: 60 })], aOpts: { ability: "technician" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(41);
+  });
+
+  it("Adaptability pushes STAB to 2×: 37 becomes 74", () => {
+    const { state } = duel({ aOpts: { ability: "adaptability" }, bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(74);
+  });
+
+  it("Blaze: 1.5× Fire power below a third of HP", () => {
+    // power 120: base floor(2640/50)+2 = 54; fire STAB floor(54*1.5) = 81.
+    const flame = move({ slug: "flame", name: "Flame", type: "fire" });
+    const { a, b } = duel({ aMon: { types: ["fire"] }, aMoves: [flame], aOpts: { ability: "blaze" }, bMoves: [swordsDance()] });
+    a.hp = 58; // 58*3 = 174 ≤ 175
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(81);
+  });
+
+  it("Regenerator heals a third on the way out", () => {
+    const a = createBattler(mon({ name: "Alpha", stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }), { moves: [move()], ability: "regenerator" });
+    const a2 = createBattler(mon({ id: 4, name: "Delta" }), { moves: [move()] });
+    const b = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    a.hp = 60;
+    const state = createBattle([a, a2], [b]);
+    const { state: s2 } = playTurn(state, [{ type: "switch", to: 1 }, attack], scriptRng());
+    // floor(175/3) = 58 → 118.
+    expect(s2.teams[0].battlers[0].hp).toBe(118);
+  });
+
+  it("Sturdy hangs on at 1 HP and keeps working from full", () => {
+    const nuke = move({ slug: "nuke", name: "Nuke", type: "fighting", power: 150 });
+    const { state } = duel({ aMon: { types: ["fighting"] }, aMoves: [nuke], bOpts: { ability: "sturdy" }, bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "endure" && e.via === "Sturdy")).toBe(true);
+    expect(s2.teams[1].battlers[0].hp).toBe(1);
   });
 });
