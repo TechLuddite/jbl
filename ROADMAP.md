@@ -25,7 +25,10 @@ turn by turn. Agreed scope, in landing order:
 
 1. **Data.** Bake learnsets (latest version group per Pokémon), ability slugs,
    and the full move list — status moves included — with accuracy, PP,
-   priority, and effect metadata. Re-bake required.
+   priority, and effect metadata. The script is ready; the bake itself still
+   needs to run somewhere that can reach pokeapi.co (`npm run refresh-dex`,
+   then commit the JSON). Until then the app runs on the 52-entry sample set,
+   where every move is legal and nothing ever misses (no accuracy data).
 2. **Engine core** (`src/lib/sim.js`, tested like `battle.js`): speed and
    priority order, accuracy and misses, crits, PP, the five status conditions,
    stat stages, faint-and-switch. Seeded RNG so tests are exact.
