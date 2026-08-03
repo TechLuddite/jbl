@@ -8,7 +8,9 @@ description: Re-bake the full Pokedex from PokeAPI and verify the result
 3. Sanity-check the output before committing:
    - pokedex.json has roughly 1300+ entries
    - Pikachu (id 25) has base stats 35/55/40/50/50/90
-   - moves.json contains no entries where `power` is null
+   - moves.json includes status moves (power is null for those by design);
+     damaging moves with a fixed power have it set — spot-check
+     Thunderbolt (90) and Earthquake (100)
 4. Run `npm run test:run && npm run build`.
 5. Commit both JSON files. They are meant to be in version control — the app
    must never call PokéAPI at runtime.

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import { resolveMatchup } from "../lib/battle.js";
 import { NATURES } from "../lib/natures.js";
 import { POKEDEX, MOVES } from "../data/index.js";
-import { TypeChip, Field } from "../components.jsx";
+import { TypeChip, Field, PokemonSelect } from "../components.jsx";
 
 /**
  * The heart of the app: a damage calculator that shows every step.
@@ -42,9 +42,7 @@ export default function DamageCalc() {
       <div className="eyebrow">Set up the matchup</div>
       <div className="grid" style={{ marginBottom: 18 }}>
         <Field label="Attacker">
-          <select className="fld" value={attackerId} onChange={(e) => setAttackerId(+e.target.value)}>
-            {POKEDEX.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          <PokemonSelect list={POKEDEX} value={attackerId} onChange={setAttackerId} />
         </Field>
         <Field label="Move">
           <select className="fld" value={moveName} onChange={(e) => setMoveName(e.target.value)}>
@@ -52,9 +50,7 @@ export default function DamageCalc() {
           </select>
         </Field>
         <Field label="Defender">
-          <select className="fld" value={defenderId} onChange={(e) => setDefenderId(+e.target.value)}>
-            {POKEDEX.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          <PokemonSelect list={POKEDEX} value={defenderId} onChange={setDefenderId} />
         </Field>
         <Field label="Level">
           <input className="fld" type="number" min="1" max="100" value={level}

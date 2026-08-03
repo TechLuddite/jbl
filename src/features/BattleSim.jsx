@@ -4,7 +4,7 @@ import {
   createBattler, createBattle, playTurn, replaceFainted, openBattle,
   makeRng, chooseAiAction, ITEMS, ABILITIES,
 } from "../lib/sim.js";
-import { TypeChip, Field } from "../components.jsx";
+import { TypeChip, Field, PokemonSelect } from "../components.jsx";
 import * as storage from "../lib/storage.js";
 
 /**
@@ -366,11 +366,9 @@ function TeamSlot({ slot, onChange, onRemove }) {
 
   return (
     <div style={{ borderTop: "1px solid var(--rule)", paddingTop: 8, marginBottom: 10 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-        <select className="fld" style={{ flex: 1 }} value={slot.pokemonId}
-                onChange={(e) => onChange({ pokemonId: +e.target.value })}>
-          {POKEDEX.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
-        </select>
+      <div style={{ display: "flex", gap: 8, alignItems: "start", marginBottom: 6 }}>
+        <PokemonSelect list={POKEDEX} style={{ flex: 1 }} value={slot.pokemonId}
+                       onChange={(id) => onChange({ pokemonId: id })} />
         <input className="fld" style={{ width: 64 }} type="number" min="1" max="100"
                title="Level" value={slot.level}
                onChange={(e) => onChange({ level: Math.min(100, Math.max(1, +e.target.value || 1)) })} />
