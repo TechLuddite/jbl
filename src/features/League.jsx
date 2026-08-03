@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { TYPES } from "../lib/typeChart.js";
+import { POKEDEX } from "../data/index.js";
 import * as storage from "../lib/storage.js";
 import { TypeChip } from "../components.jsx";
+import LeagueBattles from "./Tourney.jsx";
 
 /**
  * Family league tracker.
@@ -61,6 +63,21 @@ export default function League() {
 
   const nameOf = (id) => trainers.find((t) => t.id === id)?.name ?? "—";
 
+  // Sim battles can land several results in the same millisecond, so the id
+  // needs more than Date.now() to stay unique.
+  const idSeq = useRef(0);
+  function logResult(a, b, winnerId, flags = {}) {
+    setBattles((prev) => [...prev, {
+      id: Date.now() * 1000 + (idSeq.current++ % 1000),
+      a: +a, b: +b, winner: +winnerId,
+      date: new Date().toISOString().slice(0, 10),
+      sim: true, ...flags,
+    }]);
+  }
+
+  const setPokemon = (trainerId, pokemonId) =>
+    setTrainers((prev) => prev.map((t) => (t.id === trainerId ? { ...t, pokemonId } : t)));
+
   function addTrainer() {
     const name = newName.trim();
     if (!name) return;
@@ -110,7 +127,7 @@ export default function League() {
       <table className="lb" style={{ marginBottom: 22 }}>
         <thead>
           <tr>
-            <th>#</th><th>Trainer</th><th>Role</th><th>Type</th>
+            <th>#</th><th>Trainer</th><th>Role</th><th>Type</th><th>Pokémon</th>
             <th>W</th><th>L</th><th>Win %</th><th>Streak</th><th />
           </tr>
         </thead>
@@ -121,6 +138,7 @@ export default function League() {
               <td style={{ fontWeight: 600 }}>{t.name}</td>
               <td style={{ color: "var(--ink-soft)" }}>{t.role}</td>
               <td><TypeChip type={t.specialty} /></td>
+              <td>{POKEDEX.find((p) => p.id === t.pokemonId)?.name ?? "—"}</td>
               <td>{t.wins}</td>
               <td>{t.losses}</td>
               <td>{t.played ? `${Math.round(t.rate * 100)}%` : "—"}</td>
@@ -189,6 +207,8 @@ export default function League() {
         </div>
       </div>
 
+      <LeagueBattles trainers={trainers} onSetPokemon={setPokemon} logResult={logResult} />
+
       <div className="eyebrow" style={{ marginTop: 22 }}>
         Battle log · {battles.length} recorded
       </div>
@@ -201,7 +221,14 @@ export default function League() {
             {[...battles].reverse().map((b) => (
               <tr key={b.id}>
                 <td style={{ color: "var(--ink-soft)" }}>{b.date}</td>
-                <td>{nameOf(b.a)} vs {nameOf(b.b)}</td>
+                <td>
+                  {nameOf(b.a)} vs {nameOf(b.b)}
+                  {(b.tourney || b.sim) && (
+                    <span className="mono" style={{ fontSize: 10, color: "var(--ink-soft)" }}>
+                      {" "}· {b.tourney ? "tourney" : "sim"}
+                    </span>
+                  )}
+                </td>
                 <td style={{ fontWeight: 600 }}>{nameOf(b.winner)}</td>
                 <td style={{ textAlign: "right" }}>
                   <button className="btn ghost tiny"
