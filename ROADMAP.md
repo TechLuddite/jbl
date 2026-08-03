@@ -18,15 +18,35 @@ them; nothing feeds it yet.
 **No bracket structure.** Battles are logged flat. There's no tournament tree,
 no badge tracking, no season concept.
 
+## In progress: the battle sim
+
+Decided 2026-08. U-pick battle sim: two teams of 1–6 Pokémon, played out
+turn by turn. Agreed scope, in landing order:
+
+1. **Data.** Bake learnsets (latest version group per Pokémon), ability slugs,
+   and the full move list — status moves included — with accuracy, PP,
+   priority, and effect metadata. Re-bake required.
+2. **Engine core** (`src/lib/sim.js`, tested like `battle.js`): speed and
+   priority order, accuracy and misses, crits, PP, the five status conditions,
+   stat stages, faint-and-switch. Seeded RNG so tests are exact.
+3. **Battle tab UI.** Team picker (learnset-legal moves when the full dex is
+   present; free pick on the sample set), hotseat turn-by-turn play with the
+   working shown every turn, plus an auto-battle mode where the sim picks
+   moves.
+4. **Kitchen-sink expansion, staged:** weather, entry hazards, held items,
+   abilities. Items and abilities land as a curated set of the common ones
+   first and grow from there — correctness over coverage.
+
+Sim battles can optionally be recorded in the league — the app asks after the
+battle ends; nothing is logged automatically.
+
 ## Next up
 
-- [ ] **Held items and abilities in the calculator.** Biggest accuracy win.
-      Needs a new data field on dex entries, so re-bake required.
-- [ ] **Stat stages (+1 through +6).** Easy, high perceived value.
 - [ ] **Badge tracking in the league.** Eight badges, earned by beating the
       matching Gym Leader. Pairs with physical printed badges.
 - [ ] **Team builder.** Save a six-Pokémon team, see combined type coverage and
       shared weaknesses. Natural bridge between the calc and stat tabs.
+      (The sim's team picker is the natural seed for this.)
 
 ## Later
 

@@ -53,6 +53,8 @@ src/
   lib/
     battle.js       ← the math. Tested. Treat as fixed.
     battle.test.js  ← the guardrail.
+    sim.js          ← battle sim engine. Same rules as battle.js: tested,
+                      seeded RNG, expected values derived by hand.
     typeChart.js    ← type table + palette. Treat as fixed.
     natures.js      ← all 25 natures.
     storage.js      ← persistence. Async by design (see below).
@@ -120,8 +122,18 @@ product.
 Do not "fix" these without being asked — they're tracked in ROADMAP.md:
 
 - League data is localStorage, single-device. Export/import JSON is the stopgap.
-- No held items, abilities, weather, or stat stages in the calculator.
 - Single-battle logging only; no bracket or tournament structure.
+
+## The battle sim (in progress)
+
+Scope was agreed in 2026-08 and lives in ROADMAP.md. The short version:
+two u-pick teams of 1–6, hotseat and auto modes, real learnsets from the
+latest version group, and an engine that grows toward statuses, stat stages,
+weather, hazards, items and abilities — items/abilities as a curated set
+first. `src/lib/sim.js` follows the same law as `battle.js`: every mechanic
+tested with hand-derived values, RNG injected so tests are exact, and the
+existing battle.js/typeChart.js files stay untouched. Sim results only enter
+the league when the player says yes to the post-battle prompt.
 
 ## Working style
 
