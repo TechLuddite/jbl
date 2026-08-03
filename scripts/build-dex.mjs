@@ -128,6 +128,7 @@ async function buildMoves() {
       // The sim engine reads these. meta is null for a handful of moves.
       meta: m.meta
         ? {
+            category: m.meta.category?.name ?? null,
             ailment: m.meta.ailment?.name ?? "none",
             ailmentChance: m.meta.ailment_chance,
             critRate: m.meta.crit_rate,
