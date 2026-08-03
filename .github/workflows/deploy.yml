@@ -42,7 +42,11 @@ jobs:
           test -f dist/CNAME || { echo "::error::dist/CNAME missing — custom domain will break"; exit 1; }
           echo "CNAME: $(cat dist/CNAME)"
 
+      # enablement: true switches Pages on (source: GitHub Actions) the first
+      # time this runs, so no manual Settings → Pages step is needed.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
