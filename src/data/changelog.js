@@ -8,7 +8,10 @@
  *     turn", not "implemented two-turn charge move semantics".
  *   - Say what it means in a battle, not what changed in the code.
  *   - `credit` is for when someone spotted it. Use it — being named in the
- *     changelog is the best part of reporting something.
+ *     changelog is the best part of reporting something. But only when you
+ *     actually know whose it was: leave it off rather than guess. The people
+ *     reading this remember exactly what they did and didn't suggest, and a
+ *     credit on the wrong entry sours the ones that are right.
  *
  * `kind` is "new" for things that weren't there before and "fix" for things
  * that were wrong.
@@ -18,7 +21,6 @@ export const CHANGELOG = [
   {
     date: "2026-08-04",
     title: "This page, and a way to report things",
-    credit: "Joseph's idea",
     changes: [
       { kind: "new", text: "The What's new tab you're reading. Every update to the lab gets written up here, in words that actually say what changed in a battle. There's a dot on the tab when there's something you haven't read." },
       { kind: "new", text: "The Report tab. Found a move that doesn't work like the real game? Write it down and press send — it opens GitHub with your report already filled in. Pick the move it's about and it gets filed under that name." },
