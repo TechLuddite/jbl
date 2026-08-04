@@ -19,12 +19,16 @@ export function Field({ label, children }) {
 }
 
 /**
- * A Pokémon picker that opens into a searchable list. With 1300+ entries a
- * plain select is unscrollable, so the open panel puts a search box right on
- * top of the list. Custom rather than a native select because you can't put
- * an input inside one.
+ * A picker that opens into a searchable list. With 1300+ Pokémon (or a few
+ * hundred moves) a plain select is unscrollable, so the open panel puts a
+ * search box right on top of the list. Custom rather than a native select
+ * because you can't put an input inside one.
+ *
+ * `groups` is [{ label?, items: [{ key, label, search? }] }] — a group label
+ * renders as a non-selectable heading, like an optgroup. Matching runs on
+ * `search` when given (so "Flamethrower · 90" still matches by name only).
  */
-export function PokemonSelect({ list, value, onChange, style }) {
+function SearchPick({ groups, value, onChange, placeholder, fallback, style }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -32,9 +36,23 @@ export function PokemonSelect({ list, value, onChange, style }) {
   const inputRef = useRef(null);
   const listRef = useRef(null);
 
-  const current = list.find((p) => p.id === value);
   const q = query.trim().toLowerCase();
-  const matches = q ? list.filter((p) => p.name.toLowerCase().includes(q)) : list;
+  const shown = groups
+    .map((g) => ({
+      ...g,
+      items: q
+        ? g.items.filter((it) => (it.search ?? it.label).toLowerCase().includes(q))
+        : g.items,
+    }))
+    .filter((g) => g.items.length > 0);
+  const matches = shown.flatMap((g) => g.items);
+  const current = groups.flatMap((g) => g.items).find((it) => it.key === value);
+
+  // Flat index of each group's first row, so keyboard nav can run over the
+  // whole list while the rows render grouped.
+  const offsets = [];
+  let acc = 0;
+  for (const g of shown) { offsets.push(acc); acc += g.items.length; }
 
   useEffect(() => {
     if (!open) return;
@@ -51,17 +69,18 @@ export function PokemonSelect({ list, value, onChange, style }) {
 
   // Keep the highlighted row visible while arrowing through the list.
   useEffect(() => {
-    if (open) listRef.current?.children[active]?.scrollIntoView({ block: "nearest" });
+    if (open) listRef.current?.querySelector("[data-active]")?.scrollIntoView({ block: "nearest" });
   }, [open, active]);
 
   const openPanel = () => {
     setQuery("");
-    setActive(Math.max(0, list.findIndex((p) => p.id === value)));
+    const all = groups.flatMap((g) => g.items);
+    setActive(Math.max(0, all.findIndex((it) => it.key === value)));
     setOpen(true);
   };
 
-  const pick = (p) => {
-    onChange(p.id);
+  const pick = (it) => {
+    onChange(it.key);
     setOpen(false);
   };
 
@@ -87,7 +106,7 @@ export function PokemonSelect({ list, value, onChange, style }) {
         className="fld pokepick-btn"
         onClick={() => (open ? setOpen(false) : openPanel())}
       >
-        {current?.name ?? "Pick a Pokémon"}
+        {current?.label ?? fallback}
         <span className="pokepick-caret">▾</span>
       </button>
       {open && (
@@ -96,24 +115,32 @@ export function PokemonSelect({ list, value, onChange, style }) {
             ref={inputRef}
             className="fld"
             type="search"
-            placeholder="Start typing a name…"
+            placeholder={placeholder}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setActive(0); }}
             onKeyDown={onKey}
           />
           <div className="pokepick-list" ref={listRef}>
-            {matches.map((p, i) => (
-              <div
-                key={p.id}
-                className="pokepick-opt"
-                data-active={i === active || undefined}
-                data-current={p.id === value || undefined}
-                onPointerDown={(e) => e.preventDefault()}
-                onClick={(e) => { e.preventDefault(); pick(p); }}
-                onMouseMove={() => setActive(i)}
-              >
-                {p.name}
-              </div>
+            {shown.map((g, gi) => (
+              <React.Fragment key={g.label ?? gi}>
+                {g.label && <div className="pokepick-group">{g.label}</div>}
+                {g.items.map((it, ii) => {
+                  const i = offsets[gi] + ii;
+                  return (
+                    <div
+                      key={it.key}
+                      className="pokepick-opt"
+                      data-active={i === active || undefined}
+                      data-current={it.key === value || undefined}
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={(e) => { e.preventDefault(); pick(it); }}
+                      onMouseMove={() => setActive(i)}
+                    >
+                      {it.label}
+                    </div>
+                  );
+                })}
+              </React.Fragment>
             ))}
             {matches.length === 0 && (
               <div className="empty" style={{ padding: 8 }}>No names match.</div>
@@ -122,6 +149,45 @@ export function PokemonSelect({ list, value, onChange, style }) {
         </div>
       )}
     </div>
+  );
+}
+
+export function PokemonSelect({ list, value, onChange, style }) {
+  return (
+    <SearchPick
+      groups={[{ items: list.map((p) => ({ key: p.id, label: p.name })) }]}
+      value={value}
+      onChange={onChange}
+      placeholder="Start typing a name…"
+      fallback="Pick a Pokémon"
+      style={style}
+    />
+  );
+}
+
+/**
+ * The move picker: damaging moves up top with their power, status moves in
+ * their own group underneath, matching the old optgroup layout. `allowEmpty`
+ * adds the "— empty —" slot the team builder uses; it hides while searching.
+ */
+export function MoveSelect({ moves, value, onChange, allowEmpty = false, style }) {
+  const damaging = moves.filter((m) => m.power != null && m.category !== "status");
+  const status = moves.filter((m) => m.power == null || m.category === "status");
+  const groups = [];
+  if (allowEmpty) groups.push({ items: [{ key: "", label: "— empty —", search: "" }] });
+  groups.push({ items: damaging.map((m) => ({ key: m.name, label: `${m.name} · ${m.power}`, search: m.name })) });
+  if (status.length) {
+    groups.push({ label: "Status moves", items: status.map((m) => ({ key: m.name, label: m.name })) });
+  }
+  return (
+    <SearchPick
+      groups={groups}
+      value={value}
+      onChange={onChange}
+      placeholder="Start typing a move…"
+      fallback="Pick a move"
+      style={style}
+    />
   );
 }
 
