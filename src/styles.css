@@ -68,7 +68,8 @@ body {
        color: rgba(255, 255, 255, 0.72); }
 
 /* ---- tabs ---- */
-.tabs { display: flex; gap: 6px; margin: 12px 0 0; }
+/* Wraps because the tab row outgrew one line on a phone. */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; }
 
 .tab {
   font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600;
@@ -78,6 +79,16 @@ body {
 }
 .tab[data-on="true"] { background: var(--screen); color: var(--ink); }
 .tab:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* What's new and Report are about the app, not about Pokémon, so they sit
+   over on the right, a shade quieter than the tabs you battle with. */
+.tab-group { display: flex; gap: 6px; margin-left: auto; }
+.tab[data-meta] { background: rgba(0, 0, 0, 0.16); color: rgba(255, 255, 255, 0.6); }
+.tab[data-meta][data-on="true"] { background: var(--screen); color: var(--ink); }
+
+/* The "there's something new" pip on the What's new tab. */
+.tab-dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px;
+           border-radius: 50%; background: var(--amber); vertical-align: middle; }
 
 /* ---- screen ---- */
 .screen {
@@ -182,6 +193,34 @@ table.lb tr:hover td { background: #e5e9db; }
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* Anchors styled as buttons can't use :disabled. */
+.btn[data-disabled] { opacity: 0.45; cursor: not-allowed; }
+a.btn { text-decoration: none; display: inline-block; }
+
+/* ---- what's new ---- */
+.news-entry { border-left: 3px solid var(--shell); padding: 2px 0 2px 14px;
+              margin-bottom: 22px; }
+.news-date { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+             color: var(--ink-soft); }
+.news-title { font-size: 17px; margin: 2px 0 0; letter-spacing: -0.01em; }
+.news-credit { font-size: 11px; color: var(--amber); margin-top: 3px; }
+.news-intro { font-size: 13px; color: var(--ink-soft); margin: 6px 0 0; max-width: 62ch; }
+.news-list { list-style: none; margin: 8px 0 0; padding: 0;
+             font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+.news-list li { display: flex; gap: 8px; align-items: baseline;
+                padding: 4px 0; max-width: 74ch; }
+.news-chip { flex: none; min-width: 42px; text-align: center; }
+
+/* ---- report ---- */
+.report-kinds { display: grid; gap: 6px;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.report-kind { display: flex; flex-direction: column; align-items: flex-start;
+               gap: 3px; text-align: left; text-transform: none;
+               letter-spacing: 0; padding: 9px 11px; line-height: 1.35; }
+.report-kind[data-on] { background: var(--ink); color: var(--screen);
+                        border-color: var(--ink); }
+.report-kind-blurb { font-size: 10px; opacity: 0.75; font-weight: 400; }
+textarea.fld { resize: vertical; line-height: 1.45; }
 
 @media (max-width: 560px) {
   .screen { padding: 12px; }

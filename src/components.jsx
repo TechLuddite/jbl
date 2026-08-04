@@ -170,11 +170,11 @@ export function PokemonSelect({ list, value, onChange, style }) {
  * their own group underneath, matching the old optgroup layout. `allowEmpty`
  * adds the "— empty —" slot the team builder uses; it hides while searching.
  */
-export function MoveSelect({ moves, value, onChange, allowEmpty = false, style }) {
+export function MoveSelect({ moves, value, onChange, allowEmpty = false, emptyLabel = "— empty —", style }) {
   const damaging = moves.filter((m) => m.power != null && m.category !== "status");
   const status = moves.filter((m) => m.power == null || m.category === "status");
   const groups = [];
-  if (allowEmpty) groups.push({ items: [{ key: "", label: "— empty —", search: "" }] });
+  if (allowEmpty) groups.push({ items: [{ key: "", label: emptyLabel, search: "" }] });
   groups.push({ items: damaging.map((m) => ({ key: m.name, label: `${m.name} · ${m.power}`, search: m.name })) });
   if (status.length) {
     groups.push({ label: "Status moves", items: status.map((m) => ({ key: m.name, label: m.name })) });
