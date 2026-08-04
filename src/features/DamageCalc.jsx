@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import { resolveMatchup } from "../lib/battle.js";
 import { NATURES } from "../lib/natures.js";
 import { POKEDEX, MOVES } from "../data/index.js";
-import { TypeChip, Field, PokemonSelect } from "../components.jsx";
+import { TypeChip, Field, PokemonSelect, MoveSelect } from "../components.jsx";
 
 /**
  * The heart of the app: a damage calculator that shows every step.
@@ -45,9 +45,7 @@ export default function DamageCalc() {
           <PokemonSelect list={POKEDEX} value={attackerId} onChange={setAttackerId} />
         </Field>
         <Field label="Move">
-          <select className="fld" value={moveName} onChange={(e) => setMoveName(e.target.value)}>
-            {MOVES.map((m) => <option key={m.name} value={m.name}>{m.name} · {m.power}</option>)}
-          </select>
+          <MoveSelect moves={MOVES} value={moveName} onChange={setMoveName} />
         </Field>
         <Field label="Defender">
           <PokemonSelect list={POKEDEX} value={defenderId} onChange={setDefenderId} />

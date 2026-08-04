@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { POKEDEX, legalMoves } from "../data/index.js";
 import { ITEMS } from "../lib/sim.js";
-import { TypeChip, Field, PokemonSelect } from "../components.jsx";
+import { TypeChip, Field, PokemonSelect, MoveSelect } from "../components.jsx";
 import * as storage from "../lib/storage.js";
 import BattleRunner, { newSlot, dexOf, abilityOptions } from "./BattleRunner.jsx";
 
@@ -176,8 +176,6 @@ export default function BattleSim() {
 function TeamSlot({ slot, onChange, onRemove }) {
   const p = dexOf(slot);
   const legal = legalMoves(p);
-  const damaging = legal.filter((m) => m.power != null && m.category !== "status");
-  const status = legal.filter((m) => m.power == null || m.category === "status");
 
   return (
     <div style={{ borderTop: "1px solid var(--rule)", paddingTop: 8, marginBottom: 10 }}>
@@ -213,26 +211,17 @@ function TeamSlot({ slot, onChange, onRemove }) {
       </div>
       <div style={{ display: "grid", gap: 4, gridTemplateColumns: "1fr 1fr" }}>
         {[0, 1, 2, 3].map((i) => (
-          <select
+          <MoveSelect
             key={i}
-            className="fld"
+            moves={legal}
+            allowEmpty
             value={slot.moveNames[i] ?? ""}
-            onChange={(e) => {
+            onChange={(name) => {
               const names = [...slot.moveNames];
-              names[i] = e.target.value;
+              names[i] = name;
               onChange({ moveNames: names.filter(Boolean) });
             }}
-          >
-            <option value="">— empty —</option>
-            {damaging.map((m) => (
-              <option key={m.name} value={m.name}>{m.name} · {m.power}</option>
-            ))}
-            {status.length > 0 && (
-              <optgroup label="Status moves">
-                {status.map((m) => <option key={m.name} value={m.name}>{m.name}</option>)}
-              </optgroup>
-            )}
-          </select>
+          />
         ))}
       </div>
     </div>
