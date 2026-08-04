@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   createBattler, createBattle, playTurn, replaceFainted, openBattle,
-  makeRng, stageMult, effectiveSpeed, chooseAiAction,
+  makeRng, stageMult, effectiveSpeed, chooseAiAction, switchBlockedBy,
 } from "./sim.js";
 
 /**
@@ -795,5 +795,896 @@ describe("abilities", () => {
     const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
     expect(events.some((e) => e.type === "endure" && e.via === "Sturdy")).toBe(true);
     expect(s2.teams[1].battlers[0].hp).toBe(1);
+  });
+});
+
+/* ======================================================================== *
+ *  Multi-turn mechanics.
+ *
+ *  Same rule as everything above: the numbers are worked out by hand from
+ *  the formula in battle.js before the code is run, not copied out of the
+ *  output afterwards. The reference fixture is unchanged — every stat 120,
+ *  175 HP, level 50, and the standard 80-power hit lands for 37 without STAB.
+ * ======================================================================== */
+
+/** Build a move with a meta block, since most multi-turn moves need one. */
+const withMeta = (over = {}, meta = {}) => move({
+  meta: {
+    category: "damage", ailment: "none", ailmentChance: 0, critRate: 0,
+    drain: 0, healing: 0, flinchChance: 0, minHits: null, maxHits: null,
+    ...meta,
+  },
+  ...over,
+});
+
+const statusMove = (over = {}, meta = {}) => withMeta(
+  { power: null, accuracy: null, category: "status", pp: 10, ...over },
+  { category: "unique", ...meta }
+);
+
+describe("charging moves", () => {
+  // Solar Beam: 120 power special, spa 120 vs spd 120, no STAB (water user).
+  //   floor(floor(22*120*120/120)/50)+2 = floor(2640/50)+2 = 52+2 = 54
+  const solarBeam = () => withMeta({
+    slug: "solar-beam", name: "Solar Beam", type: "grass",
+    power: 120, category: "special", pp: 10,
+  });
+
+  it("spends the first turn charging and fires 54 on the second", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [solarBeam()], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "charge" && e.move === "Solar Beam")).toBe(true);
+    expect(t1.events.some((e) => e.type === "damage")).toBe(false);
+    // PP is spent when the move starts, not when it lands.
+    expect(t1.state.teams[0].battlers[0].moves[0].pp).toBe(9);
+
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(54);
+    expect(t2.state.teams[0].battlers[0].moves[0].pp).toBe(9);
+  });
+
+  it("fires the same turn in harsh sunlight", () => {
+    const { a, b } = duel({
+      aMon: { types: ["water"] }, aMoves: [solarBeam()], bMoves: [swordsDance()],
+    });
+    const state = createBattle([a], [b]);
+    state.weather = { kind: "sun", turns: 5 };
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "charge")).toBe(false);
+    expect(events.find((e) => e.type === "damage").amount).toBe(54);
+  });
+
+  it("still charges in rain, and hits at half power: 60 power = 28", () => {
+    // floor(120/2) = 60 power → floor(floor(22*60*120/120)/50)+2 = 26+2 = 28.
+    const { a, b } = duel({
+      aMon: { types: ["water"] }, aMoves: [solarBeam()], bMoves: [swordsDance()],
+    });
+    const state = createBattle([a], [b]);
+    state.weather = { kind: "rain", turns: 5 };
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "charge")).toBe(true);
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(28);
+  });
+
+  it("Power Herb skips the charge turn once and is used up", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [solarBeam()], bMoves: [swordsDance()],
+      aOpts: { item: "power-herb" },
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "itemUsed" && e.item === "Power Herb")).toBe(true);
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(54);
+    expect(t1.state.teams[0].battlers[0].item).toBeNull();
+
+    // Second time there is no herb left, so it has to charge.
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "charge")).toBe(true);
+  });
+
+  it("Skull Bash raises Defense while it winds up", () => {
+    const skullBash = withMeta({ slug: "skull-bash", name: "Skull Bash", power: 130 });
+    const { state } = duel({ aMoves: [skullBash], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[0].battlers[0].stages.def).toBe(1);
+    expect(t1.events.some((e) => e.type === "damage")).toBe(false);
+  });
+
+  it("nothing can touch a Pokémon that is up in the air", () => {
+    // Fly: 90 power, no STAB (water user) →
+    //   floor(floor(22*90*120/120)/50)+2 = 39+2 = 41 when it comes down.
+    const fly = withMeta({ slug: "fly", name: "Fly", type: "flying", power: 90, accuracy: 95 });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [fly] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const missed = t1.events.find((e) => e.type === "miss");
+    expect(missed.hiding).toBe("air");
+    expect(t1.state.teams[0].battlers[0].hp).toBe(175); // Beta whiffed entirely
+
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage" && e.name === "Beta").amount).toBe(41);
+  });
+
+  it("Earthquake reaches a digging Pokémon and hits twice as hard: 90", () => {
+    // 100 power doubled to 200, no STAB (water user):
+    //   floor(floor(22*200*120/120)/50)+2 = 88+2 = 90.
+    const quake = withMeta({ slug: "earthquake", name: "Earthquake", type: "ground", power: 100 });
+    const dig = withMeta({ slug: "dig", name: "Dig", type: "ground", power: 80 });
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [quake],
+      bMon: { types: ["normal"] }, bMoves: [dig],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[1].battlers[0].vol.charge.invuln).toBe("underground");
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage" && e.name === "Beta").amount).toBe(90);
+  });
+
+  it("a Pokémon mid-charge cannot be switched out", () => {
+    const solar = solarBeam();
+    const a = createBattler(mon({ name: "Alpha", types: ["water"], stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }), { moves: [solar] });
+    const a2 = createBattler(mon({ id: 4, name: "Delta" }), { moves: [move()] });
+    const b = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    const state = createBattle([a, a2], [b]);
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(switchBlockedBy(t1.state, 0)).toBe("its own move");
+    const t2 = playTurn(t1.state, [{ type: "switch", to: 1 }, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "trapped")).toBe(true);
+    expect(t2.state.teams[0].active).toBe(0);
+  });
+});
+
+describe("recharge moves", () => {
+  // Hyper Beam: 150 power special, no STAB (water user):
+  //   floor(floor(22*150*120/120)/50)+2 = 66+2 = 68.
+  const hyperBeam = () => withMeta({
+    slug: "hyper-beam", name: "Hyper Beam", power: 150,
+    category: "special", accuracy: 90, pp: 5,
+  });
+
+  it("hits for 68, then loses the next turn getting its breath back", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [hyperBeam()], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(68);
+    expect(t1.events.some((e) => e.type === "mustRecharge")).toBe(true);
+
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "recharge")).toBe(true);
+    expect(t2.events.some((e) => e.type === "damage")).toBe(false);
+    expect(t2.state.teams[0].battlers[0].moves[0].pp).toBe(4); // no second charge
+
+    // And it is swinging again on the turn after that.
+    const t3 = playTurn(t2.state, [attack, attack], scriptRng());
+    expect(t3.events.find((e) => e.type === "damage").amount).toBe(68);
+  });
+
+  it("a miss costs no recharge", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [hyperBeam()], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng({ chance: [false] }));
+    expect(t1.events.some((e) => e.type === "miss")).toBe(true);
+    expect(t1.events.some((e) => e.type === "mustRecharge")).toBe(false);
+    expect(t1.state.teams[0].battlers[0].vol.recharge).toBe(false);
+  });
+});
+
+describe("rampage locks and confusion", () => {
+  // Outrage: 120 power physical, dragon into normal is neutral, no STAB
+  // (water user) → floor(floor(22*120*120/120)/50)+2 = 54.
+  const outrage = () => withMeta({
+    slug: "outrage", name: "Outrage", type: "dragon", power: 120,
+    target: "random-opponent", pp: 10,
+  });
+
+  it("swings for three turns on 54 each, then confuses itself", () => {
+    // scriptRng's int(2) is 1, so the lock runs the full three turns.
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [outrage()], bMoves: [swordsDance()],
+    });
+    let s = state;
+    for (let turn = 1; turn <= 3; turn++) {
+      const r = playTurn(s, [attack, attack], scriptRng());
+      expect(r.events.find((e) => e.type === "damage").amount).toBe(54);
+      // PP is only spent on the turn the move was chosen, so it stays at 9
+      // for all three swings.
+      expect(r.state.teams[0].battlers[0].moves[0].pp).toBe(9);
+      s = r.state;
+    }
+    expect(s.teams[1].battlers[0].hp).toBe(175 - 54 * 3);
+    expect(s.teams[0].battlers[0].vol.locked).toBeNull();
+    expect(s.teams[0].battlers[0].vol.confusion).toBe(4); // 2 + int(4) = 4
+  });
+
+  it("keeps swinging even when the player asks for something else", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [outrage(), swordsDance()], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "move" && e.side === 0).move).toBe("Outrage");
+    expect(t2.state.teams[0].battlers[0].stages.atk).toBe(0);
+  });
+
+  it("a miss ends the rampage early, with no confusion", () => {
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [outrage()], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng({ chance: [false] }));
+    expect(t2.events.some((e) => e.type === "rampageEnd" && e.early)).toBe(true);
+    expect(t2.state.teams[0].battlers[0].vol.locked).toBeNull();
+    expect(t2.state.teams[0].battlers[0].vol.confusion).toBe(0);
+  });
+
+  it("confusion hits for 19: 40 power, its own 120 Atk into its own 120 Def", () => {
+    // floor(floor(22*40*120/120)/50)+2 = 17+2 = 19, typeless so no STAB.
+    const { a, b } = duel({ bMoves: [swordsDance()] });
+    a.vol.confusion = 3;
+    const state = createBattle([a], [b]);
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng({ chance: [true] }));
+    const hit = events.find((e) => e.type === "confusionHit");
+    expect(hit.amount).toBe(19);
+    expect(s2.teams[0].battlers[0].hp).toBe(175 - 19);
+    expect(events.some((e) => e.type === "damage")).toBe(false); // it never swung
+  });
+
+  it("snaps out when the counter runs down, and moves that turn", () => {
+    const { a, b } = duel({ bMoves: [swordsDance()] });
+    a.vol.confusion = 1;
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "confusionEnd")).toBe(true);
+    expect(events.find((e) => e.type === "damage").amount).toBe(55);
+  });
+
+  it("Own Tempo refuses to be confused", () => {
+    const confuseRay = statusMove(
+      { slug: "confuse-ray", name: "Confuse Ray", type: "ghost", accuracy: 100 },
+      { category: "ailment", ailment: "confusion" }
+    );
+    const { state } = duel({
+      aMoves: [confuseRay], bMoves: [swordsDance()], bOpts: { ability: "own-tempo" },
+    });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "immune")).toBe(true);
+    expect(s2.teams[1].battlers[0].vol.confusion).toBe(0);
+  });
+});
+
+describe("momentum moves", () => {
+  // Fury Cutter, 40 power bug, no STAB (water user):
+  //   40  → floor(floor(22*40*120/120)/50)+2 = 19
+  //   80  → floor(floor(22*80*120/120)/50)+2 = 37
+  //   160 → floor(floor(22*160*120/120)/50)+2 = 72   (and it caps there)
+  it("Fury Cutter doubles on each consecutive use: 19, 37, 72, 72", () => {
+    const furyCutter = withMeta({
+      slug: "fury-cutter", name: "Fury Cutter", type: "bug", power: 40, accuracy: 95, pp: 20,
+    });
+    const { a, b } = duel({ aMon: { types: ["water"] }, aMoves: [furyCutter], bMoves: [swordsDance()] });
+    b.stats.hp = 400; b.maxHP = 400; b.hp = 400;
+    let s = createBattle([a], [b]);
+    const dealt = [];
+    for (let i = 0; i < 4; i++) {
+      const r = playTurn(s, [attack, attack], scriptRng());
+      dealt.push(r.events.find((e) => e.type === "damage").amount);
+      s = r.state;
+    }
+    expect(dealt).toEqual([19, 37, 72, 72]);
+  });
+
+  it("a different move resets the counter", () => {
+    const furyCutter = withMeta({
+      slug: "fury-cutter", name: "Fury Cutter", type: "bug", power: 40, accuracy: 95, pp: 20,
+    });
+    // The filler is a plain weak hit on purpose: anything that moved a stat
+    // would change the third turn's number for the wrong reason.
+    const filler = withMeta({ slug: "filler", name: "Filler", power: 10 });
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [furyCutter, filler], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[0].battlers[0].vol.momentum.hits).toBe(1);
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.state.teams[0].battlers[0].vol.momentum).toBeNull();
+    const t3 = playTurn(t2.state, [attack, attack], scriptRng());
+    expect(t3.events.find((e) => e.type === "damage").amount).toBe(19);
+  });
+
+  it("Rollout locks in for five turns and doubles as it goes: 15 then 28", () => {
+    // 30 power → floor(floor(22*30*120/120)/50)+2 = 13+2 = 15; 60 → 26+2 = 28.
+    const rollout = withMeta({
+      slug: "rollout", name: "Rollout", type: "rock", power: 30, accuracy: 90, pp: 20,
+    });
+    const { a, b } = duel({ aMon: { types: ["water"] }, aMoves: [rollout, swordsDance()], bMoves: [swordsDance()] });
+    const state = createBattle([a], [b]);
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(15);
+    expect(t1.state.teams[0].battlers[0].vol.locked.kind).toBe("rollout");
+    // Asking for Swords Dance changes nothing — it is still rolling.
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(28);
+  });
+});
+
+describe("trapping", () => {
+  const fireSpin = () => withMeta(
+    {
+      slug: "fire-spin", name: "Fire Spin", type: "fire", power: 35,
+      accuracy: 85, category: "special", pp: 15, effectChance: 100,
+    },
+    { category: "damage-ailment", ailment: "trap", ailmentChance: 100 }
+  );
+
+  it("hits for 17, then squeezes 21 a turn and blocks the switch", () => {
+    // 35 power special, no STAB (water user):
+    //   floor(floor(22*35*120/120)/50)+2 = 15+2 = 17. Chip is floor(175/8) = 21.
+    const a = createBattler(mon({ name: "Alpha", types: ["water"], stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }), { moves: [fireSpin()] });
+    const b = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    const b2 = createBattler(mon({ id: 3, name: "Gamma" }), { moves: [move()] });
+    const state = createBattle([a], [b, b2]);
+
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(17);
+    expect(t1.events.find((e) => e.type === "chip").amount).toBe(21);
+    expect(t1.state.teams[1].battlers[0].hp).toBe(175 - 17 - 21);
+    // 4 + int(2) = 5 turns, one of which has already been served.
+    expect(t1.state.teams[1].battlers[0].vol.trap.turns).toBe(4);
+    expect(switchBlockedBy(t1.state, 1)).toBe("Fire Spin");
+
+    const t2 = playTurn(t1.state, [attack, { type: "switch", to: 1 }], scriptRng());
+    expect(t2.events.some((e) => e.type === "trapped" && e.by === "Fire Spin")).toBe(true);
+    expect(t2.state.teams[1].active).toBe(0);
+  });
+
+  it("lets go when the timer runs out", () => {
+    const { a, b } = duel({ aMon: { types: ["water"] }, aMoves: [fireSpin()], bMoves: [swordsDance()] });
+    b.stats.hp = 400; b.maxHP = 400; b.hp = 400;
+    let s = createBattle([a], [b]);
+    for (let i = 0; i < 5; i++) s = playTurn(s, [attack, attack], scriptRng()).state;
+    expect(s.teams[1].battlers[0].vol.trap).toBeNull();
+    expect(switchBlockedBy(s, 1)).toBeNull();
+  });
+
+  it("Mean Look holds on with no timer and no damage", () => {
+    const meanLook = statusMove({ slug: "mean-look", name: "Mean Look" });
+    const { state } = duel({ aMoves: [meanLook], bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[1].battlers[0].vol.trap).toEqual({ turns: null, by: "Mean Look" });
+    expect(events.some((e) => e.type === "chip")).toBe(false);
+  });
+});
+
+describe("Leech Seed", () => {
+  const leechSeed = () => statusMove(
+    { slug: "leech-seed", name: "Leech Seed", type: "grass", accuracy: 90 },
+    { category: "ailment", ailment: "leech-seed" }
+  );
+
+  it("saps 21 a turn and hands it to whoever planted it", () => {
+    // floor(175/8) = 21. Beta's own hit takes Alpha to 175-55 = 120 first.
+    const { state } = duel({ aMoves: [leechSeed()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "seeded")).toBe(true);
+    const sap = events.find((e) => e.type === "chip" && e.cause === "Leech Seed");
+    expect(sap.amount).toBe(21);
+    expect(s2.teams[1].battlers[0].hp).toBe(175 - 21);
+    expect(s2.teams[0].battlers[0].hp).toBe(175 - 55 + 21);
+  });
+
+  it("cannot seed a Grass type", () => {
+    const { state } = duel({ aMoves: [leechSeed()], bMon: { types: ["grass"] }, bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "immune")).toBe(true);
+    expect(s2.teams[1].battlers[0].vol.seeded).toBe(false);
+  });
+
+  it("switching out shakes the seed off", () => {
+    // Alpha's second move matters: seeding again on turn 2 would just plant
+    // the replacement and prove nothing.
+    const a = createBattler(mon({ name: "Alpha", stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }), { moves: [leechSeed(), swordsDance()] });
+    const b = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    const b2 = createBattler(mon({ id: 3, name: "Gamma" }), { moves: [swordsDance()] });
+    const state = createBattle([a], [b, b2]);
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, { type: "switch", to: 1 }], scriptRng());
+    expect(t2.state.teams[1].battlers[1].vol.seeded).toBe(false);
+    expect(t2.events.some((e) => e.type === "chip" && e.cause === "Leech Seed")).toBe(false);
+  });
+});
+
+describe("delayed moves", () => {
+  it("Wish heals 87 at the end of the turn after it is made", () => {
+    // floor(175/2) = 87.
+    const wish = statusMove({ slug: "wish", name: "Wish", target: "user" });
+    const { a, b } = duel({ aMoves: [wish], bMoves: [swordsDance()] });
+    a.hp = 50;
+    const state = createBattle([a], [b]);
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[0].battlers[0].hp).toBe(50);       // nothing yet
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "heal" && e.via === "Wish")).toBe(true);
+    expect(t2.state.teams[0].battlers[0].hp).toBe(137);
+  });
+
+  it("Future Sight lands 54 two turns later", () => {
+    // 120 power special, spa 120 vs spd 120, no STAB (water user) → 54.
+    const futureSight = withMeta(
+      { slug: "future-sight", name: "Future Sight", type: "psychic", power: 120, category: "special", pp: 10 },
+      { category: "unique" }
+    );
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [futureSight], bMoves: [swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "futureSet")).toBe(true);
+    expect(t1.events.some((e) => e.type === "damage")).toBe(false);
+
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "futureHit")).toBe(false);
+
+    const t3 = playTurn(t2.state, [attack, attack], scriptRng());
+    const hit = t3.events.find((e) => e.type === "futureHit");
+    expect(hit.amount).toBe(54);
+    expect(t3.state.teams[1].battlers[0].hp).toBe(175 - 54);
+  });
+
+  it("Perish Song counts everyone down and takes them both", () => {
+    const perishSong = statusMove(
+      { slug: "perish-song", name: "Perish Song", target: "all-pokemon", pp: 5 },
+      { category: "ailment", ailment: "perish-song" }
+    );
+    const { state } = duel({ aMoves: [perishSong], bMoves: [swordsDance()] });
+    let s = state;
+    const counts = [];
+    for (let i = 0; i < 4; i++) {
+      const r = playTurn(s, [attack, attack], scriptRng());
+      counts.push(r.events.filter((e) => e.type === "perishCount" && e.side === 0).map((e) => e.count)[0]);
+      s = r.state;
+    }
+    expect(counts).toEqual([3, 2, 1, 0]);
+    expect(s.teams[0].battlers[0].hp).toBe(0);
+    expect(s.teams[1].battlers[0].hp).toBe(0);
+    // A double wipe still names one winner, and the event agrees with it.
+    expect(s.winner).toBe(1);
+  });
+
+  it("Yawn puts the target under at the end of the next turn", () => {
+    const yawn = statusMove(
+      { slug: "yawn", name: "Yawn" },
+      { category: "ailment", ailment: "yawn" }
+    );
+    const { state } = duel({ aMoves: [yawn], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[1].battlers[0].vol.drowsy).toBe(1);
+    expect(t1.state.teams[1].battlers[0].status).toBeNull();
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.state.teams[1].battlers[0].status).toBe("sleep");
+  });
+});
+
+describe("Taunt, Encore and Disable", () => {
+  it("Taunt takes status moves off the table for three turns", () => {
+    const taunt = statusMove({ slug: "taunt", name: "Taunt", type: "dark", accuracy: 100 });
+    const { state } = duel({ aMoves: [taunt], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.some((e) => e.type === "taunted")).toBe(true);
+    // Beta's Swords Dance was blocked on the very same turn.
+    expect(t1.events.some((e) => e.type === "blockedMove" && e.by === "Taunt")).toBe(true);
+    expect(t1.state.teams[1].battlers[0].stages.atk).toBe(0);
+  });
+
+  it("Encore forces the last move again", () => {
+    const encore = statusMove({ slug: "encore", name: "Encore", accuracy: 100 });
+    const { state } = duel({
+      aMoves: [swordsDance(), encore], bMoves: [swordsDance(), move()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[1].battlers[0].stages.atk).toBe(2);
+
+    // Alpha encores; Beta asks to attack but dances again instead.
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, { type: "move", moveIndex: 1 }], scriptRng());
+    expect(t2.events.some((e) => e.type === "encored")).toBe(true);
+    expect(t2.state.teams[1].battlers[0].stages.atk).toBe(4);
+    expect(t2.events.some((e) => e.type === "damage")).toBe(false);
+  });
+
+  it("Disable takes one move away and leaves the rest", () => {
+    const disable = statusMove(
+      { slug: "disable", name: "Disable", accuracy: 100 },
+      { category: "unique", ailment: "disable" }
+    );
+    const { state } = duel({
+      aMoves: [swordsDance(), disable], bMoves: [move(), swordsDance()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "disabled")).toBe(true);
+    expect(t2.events.some((e) => e.type === "blockedMove" && e.by === "Disable")).toBe(true);
+
+    // The other move still works.
+    const t3 = playTurn(t2.state, [{ type: "move", moveIndex: 0 }, { type: "move", moveIndex: 1 }], scriptRng());
+    expect(t3.state.teams[1].battlers[0].stages.atk).toBe(2);
+  });
+});
+
+describe("screens, Tailwind and Trick Room", () => {
+  const reflect = () => statusMove(
+    { slug: "reflect", name: "Reflect", type: "psychic", target: "users-field", pp: 20 },
+    { category: "field-effect" }
+  );
+
+  it("Reflect halves a physical hit: 37 becomes 18", () => {
+    // floor(37 * 0.5) = 18, applied last in the modifier chain.
+    const { state } = duel({ aMon: { types: ["water"] }, bMoves: [reflect()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(37); // set up after Alpha hit
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(18);
+  });
+
+  it("Light Screen leaves physical hits alone", () => {
+    const lightScreen = statusMove(
+      { slug: "light-screen", name: "Light Screen", type: "psychic", target: "users-field", pp: 30 },
+      { category: "field-effect" }
+    );
+    const { state } = duel({ aMon: { types: ["water"] }, bMoves: [lightScreen] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.find((e) => e.type === "damage").amount).toBe(37);
+  });
+
+  it("a critical hit goes straight through Reflect: 55", () => {
+    // Crit before the roll: floor(37*1.5) = 55, and the screen is ignored.
+    const { state } = duel({ aMon: { types: ["water"] }, bMoves: [reflect()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng({ chance: [true, true] }));
+    const hit = t2.events.find((e) => e.type === "damage" && e.name === "Beta");
+    expect(hit.crit).toBe(true);
+    expect(hit.amount).toBe(55);
+  });
+
+  it("Reflect wears off after five turns", () => {
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [swordsDance()], bMoves: [reflect()] });
+    let s = state;
+    for (let i = 0; i < 5; i++) s = playTurn(s, [attack, attack], scriptRng()).state;
+    expect(s.teams[1].screens.reflect).toBe(0);
+  });
+
+  it("Aurora Veil refuses to go up without snow", () => {
+    const auroraVeil = statusMove(
+      { slug: "aurora-veil", name: "Aurora Veil", type: "ice", target: "users-field", pp: 20 },
+      { category: "field-effect" }
+    );
+    const { state } = duel({ aMoves: [auroraVeil], bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "moveFailed")).toBe(true);
+    expect(s2.teams[0].screens.auroraVeil).toBe(0);
+  });
+
+  it("Tailwind doubles Speed and flips who goes first", () => {
+    const tailwind = statusMove(
+      { slug: "tailwind", name: "Tailwind", type: "flying", target: "users-field", pp: 15 },
+      { category: "field-effect" }
+    );
+    const { state } = duel({ aMoves: [swordsDance()], bMoves: [tailwind, move()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    // Beta: 120 → 240, comfortably past Alpha's 130.
+    expect(effectiveSpeed(t1.state.teams[1].battlers[0], t1.state.teams[1])).toBe(240);
+    const t2 = playTurn(t1.state, [attack, { type: "move", moveIndex: 1 }], scriptRng());
+    const movers = t2.events.filter((e) => e.type === "move").map((e) => e.side);
+    expect(movers[0]).toBe(1);
+  });
+
+  it("Trick Room lets the slower Pokémon move first", () => {
+    const { a, b } = duel({ aMoves: [swordsDance()], bMoves: [swordsDance()] });
+    const state = createBattle([a], [b]);
+    state.trickRoom = 5;
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    const movers = events.filter((e) => e.type === "move").map((e) => e.side);
+    expect(movers).toEqual([1, 0]);
+  });
+
+  it("using Trick Room again tears it down", () => {
+    const trickRoom = statusMove(
+      { slug: "trick-room", name: "Trick Room", type: "psychic", target: "entire-field", priority: -7, pp: 5 },
+      { category: "whole-field-effect" }
+    );
+    const { state } = duel({ aMoves: [trickRoom], bMoves: [swordsDance()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.trickRoom).toBe(4); // set to 5, ticked once
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.state.trickRoom).toBe(0);
+    expect(t2.events.some((e) => e.type === "trickRoomEnd")).toBe(true);
+  });
+});
+
+describe("Protect and Substitute", () => {
+  // Protect targets the user, which is why it still works while the other
+  // side is off hiding somewhere.
+  const protect = () => statusMove({ slug: "protect", name: "Protect", target: "user", priority: 4, pp: 10 });
+
+  it("Protect blocks the whole attack", () => {
+    const { state } = duel({ aMoves: [protect()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "protected")).toBe(true);
+    expect(s2.teams[0].battlers[0].hp).toBe(175);
+  });
+
+  it("a second Protect in a row usually fails", () => {
+    const { state } = duel({ aMoves: [protect()] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    // The streak roll is 1/3; the default rng says no.
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "moveFailed")).toBe(true);
+    expect(t2.state.teams[0].battlers[0].hp).toBe(175 - 55);
+  });
+
+  it("Shadow Force goes straight through Protect", () => {
+    const shadowForce = withMeta({
+      slug: "shadow-force", name: "Shadow Force", type: "ghost", power: 120, pp: 5,
+    });
+    // Beta is Psychic so Ghost is super effective: 120 power, no STAB,
+    //   floor(floor(22*120*120/120)/50)+2 = 54, then floor(54*2) = 108.
+    const { state } = duel({
+      aMon: { types: ["water"] }, aMoves: [shadowForce],
+      bMon: { types: ["psychic"] }, bMoves: [protect()],
+    });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.state.teams[0].battlers[0].vol.charge.invuln).toBe("vanished");
+
+    // Beta protects (its streak roll), Alpha hits (accuracy), no crit — in
+    // that order, because Protect moves first at priority 4.
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng({ chance: [true, true, false] }));
+    expect(t2.events.some((e) => e.type === "protecting")).toBe(true);
+    expect(t2.events.some((e) => e.type === "protected")).toBe(false);
+    expect(t2.events.find((e) => e.type === "damage" && e.name === "Beta").amount).toBe(108);
+  });
+
+  it("Substitute costs 43 HP and soaks the next hit", () => {
+    // floor(175/4) = 43. A no-STAB 80-power hit is 37, so the doll survives.
+    const substitute = statusMove({ slug: "substitute", name: "Substitute", target: "user", pp: 10 });
+    const { state } = duel({ aMoves: [substitute], bMon: { types: ["water"] } });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "subMade").hp).toBe(43);
+    const hit = events.find((e) => e.type === "damage");
+    expect(hit.toSub).toBe(true);
+    expect(hit.amount).toBe(37);
+    expect(s2.teams[0].battlers[0].hp).toBe(175 - 43);   // the doll took it
+    expect(s2.teams[0].battlers[0].vol.sub).toBe(6);
+  });
+
+  it("the doll breaks and stops absorbing", () => {
+    const substitute = statusMove({ slug: "substitute", name: "Substitute", target: "user", pp: 10 });
+    const { state } = duel({ aMoves: [substitute, swordsDance()], bMon: { types: ["water"] } });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    const t2 = playTurn(t1.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "subBroke")).toBe(true);
+    const t3 = playTurn(t2.state, [{ type: "move", moveIndex: 1 }, attack], scriptRng());
+    expect(t3.state.teams[0].battlers[0].hp).toBe(175 - 43 - 37);
+  });
+
+  it("a Substitute blocks status from the other side", () => {
+    const substitute = statusMove({ slug: "substitute", name: "Substitute", target: "user", pp: 10 });
+    const twave = statusMove(
+      { slug: "thunder-wave", name: "Thunder Wave", type: "electric", accuracy: 90 },
+      { category: "ailment", ailment: "paralysis" }
+    );
+    const { state } = duel({ aMoves: [substitute], bMoves: [twave] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "subBlocked")).toBe(true);
+    expect(s2.teams[0].battlers[0].status).toBeNull();
+  });
+});
+
+describe("first-turn and focus moves", () => {
+  it("Fake Out flinches on the way in and fails ever after", () => {
+    const fakeOut = withMeta(
+      { slug: "fake-out", name: "Fake Out", power: 40, priority: 3 },
+      { flinchChance: 100 }
+    );
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [fakeOut] });
+    const t1 = playTurn(state, [attack, attack], scriptRng());
+    expect(t1.events.find((e) => e.type === "damage").amount).toBe(19);
+    expect(t1.events.some((e) => e.type === "flinch")).toBe(true);
+
+    const t2 = playTurn(t1.state, [attack, attack], scriptRng());
+    expect(t2.events.some((e) => e.type === "moveFailed")).toBe(true);
+    expect(t2.events.some((e) => e.type === "damage" && e.name === "Beta")).toBe(false);
+  });
+
+  it("Focus Punch breaks if the user is hit first", () => {
+    // Priority -3 means Beta always lands first.
+    const focusPunch = withMeta({ slug: "focus-punch", name: "Focus Punch", power: 150, priority: -3 });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [focusPunch] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "focusBroken")).toBe(true);
+    expect(events.some((e) => e.type === "damage" && e.name === "Beta")).toBe(false);
+  });
+
+  it("Focus Punch lands for 68 if nothing touches the user", () => {
+    // 150 power physical, no STAB: floor(floor(22*150*120/120)/50)+2 = 68.
+    const focusPunch = withMeta({ slug: "focus-punch", name: "Focus Punch", power: 150, priority: -3 });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [focusPunch], bMoves: [swordsDance()] });
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.find((e) => e.type === "damage").amount).toBe(68);
+  });
+});
+
+describe("Roost", () => {
+  it("gives up the Flying type for the turn, so Ground lands", () => {
+    // 100 power ground, no STAB (Beta is flying/normal here), neutral once the
+    // Flying half is gone: floor(floor(22*100*120/120)/50)+2 = 46.
+    const roost = withMeta(
+      { slug: "roost", name: "Roost", power: null, accuracy: null, category: "status", target: "user", pp: 10 },
+      { category: "heal", healing: 50 }
+    );
+    const quake = withMeta({ slug: "earthquake", name: "Earthquake", type: "ground", power: 100, priority: -1 });
+    const { a, b } = duel({
+      aMon: { types: ["water"] }, aMoves: [quake],
+      bMon: { types: ["flying"] }, bMoves: [roost],
+    });
+    b.hp = 100;
+    const state = createBattle([a], [b]);
+    const { events } = playTurn(state, [attack, attack], scriptRng());
+    // Beta roosts first (Alpha's Earthquake is priority -1), then gets hit.
+    expect(events.some((e) => e.type === "roosted")).toBe(true);
+    const hit = events.find((e) => e.type === "damage" && e.name === "Beta");
+    expect(hit.amount).toBe(46);
+  });
+});
+
+describe("stat changes land on the right Pokémon", () => {
+  const raiseSelf = (slug, name, changes, over = {}) => withMeta(
+    { slug, name, effectChance: 100, statChanges: changes, ...over },
+    { category: "damage-raise" }
+  );
+
+  it("Draco Meteor drops the USER's Sp. Atk by two", () => {
+    const draco = raiseSelf("draco-meteor", "Draco Meteor", [{ stat: "spa", change: -2 }], {
+      type: "dragon", power: 130, category: "special", accuracy: 90, pp: 5,
+    });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [draco], bMoves: [swordsDance()] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[0].battlers[0].stages.spa).toBe(-2);
+    expect(s2.teams[1].battlers[0].stages.spa).toBe(0);
+  });
+
+  it("Draco Meteor still drops the user when it knocks the target out", () => {
+    const draco = raiseSelf("draco-meteor", "Draco Meteor", [{ stat: "spa", change: -2 }], {
+      type: "dragon", power: 130, category: "special", accuracy: 90, pp: 5,
+    });
+    const { a, b } = duel({ aMon: { types: ["water"] }, aMoves: [draco], bMoves: [swordsDance()] });
+    b.hp = 5;
+    const state = createBattle([a], [b]);
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "faint")).toBe(true);
+    expect(s2.teams[0].battlers[0].stages.spa).toBe(-2);
+  });
+
+  it("Power-Up Punch raises the USER's Attack, not the target's", () => {
+    const pup = raiseSelf("power-up-punch", "Power-Up Punch", [{ stat: "atk", change: 1 }], {
+      type: "fighting", power: 40,
+    });
+    // Beta plainly attacks — a Swords Dance of its own would muddy the check.
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [pup] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[0].battlers[0].stages.atk).toBe(1);
+    expect(s2.teams[1].battlers[0].stages.atk).toBe(0);
+  });
+
+  it("Snarl drops the TARGET's Sp. Atk", () => {
+    const snarl = withMeta(
+      {
+        slug: "snarl", name: "Snarl", type: "dark", power: 55, category: "special",
+        accuracy: 95, effectChance: 100, statChanges: [{ stat: "spa", change: -1 }],
+      },
+      { category: "damage-lower" }
+    );
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [snarl], bMoves: [swordsDance()] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[1].battlers[0].stages.spa).toBe(-1);
+    expect(s2.teams[0].battlers[0].stages.spa).toBe(0);
+  });
+
+  it("Eerie Impulse drops the target's Sp. Atk sharply", () => {
+    const eerie = statusMove(
+      { slug: "eerie-impulse", name: "Eerie Impulse", type: "electric", accuracy: 100, statChanges: [{ stat: "spa", change: -2 }] },
+      { category: "net-good-stats" }
+    );
+    const { state } = duel({ aMoves: [eerie], bMoves: [swordsDance()] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[1].battlers[0].stages.spa).toBe(-2);
+  });
+
+  it("Make It Rain drops its own Sp. Atk even with no meta block at all", () => {
+    const makeItRain = move({
+      slug: "make-it-rain", name: "Make It Rain", type: "steel", power: 120,
+      category: "special", target: "all-opponents", meta: null,
+      statChanges: [{ stat: "spa", change: -1 }],
+    });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [makeItRain], bMoves: [swordsDance()] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    expect(s2.teams[0].battlers[0].stages.spa).toBe(-1);
+    expect(s2.teams[1].battlers[0].stages.spa).toBe(0);
+  });
+});
+
+describe("status moves and type immunity", () => {
+  it("a Normal-type status move still works on a Ghost", () => {
+    // Yawn is Normal-type; the type chart says Normal can't touch Ghost, but
+    // that rule is for attacks, not for status moves.
+    const yawn = statusMove({ slug: "yawn", name: "Yawn" }, { category: "ailment", ailment: "yawn" });
+    const { state } = duel({ aMoves: [yawn], bMon: { types: ["ghost"] }, bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "immune")).toBe(false);
+    expect(s2.teams[1].battlers[0].vol.drowsy).toBe(1);
+  });
+
+  it("Confuse Ray still works on a Normal type", () => {
+    const confuseRay = statusMove(
+      { slug: "confuse-ray", name: "Confuse Ray", type: "ghost", accuracy: 100 },
+      { category: "ailment", ailment: "confusion" }
+    );
+    const { state } = duel({ aMoves: [confuseRay], bMoves: [swordsDance()] });
+    const { state: s2 } = playTurn(state, [attack, attack], scriptRng());
+    // Set to 2 + int(4) = 4, and already spent one on Beta's own move this
+    // turn — being confused before you act counts against you straight away.
+    expect(s2.teams[1].battlers[0].vol.confusion).toBe(3);
+  });
+});
+
+describe("switch-out moves", () => {
+  it("U-turn hands the turn back so the user can leave", () => {
+    const uTurn = withMeta({ slug: "u-turn", name: "U-turn", type: "bug", power: 70 });
+    const a = createBattler(mon({ name: "Alpha", types: ["water"], stats: { hp: 100, atk: 100, def: 100, spa: 100, spd: 100, spe: 110 } }), { moves: [uTurn] });
+    const a2 = createBattler(mon({ id: 4, name: "Delta" }), { moves: [move()] });
+    const b = createBattler(mon({ id: 2, name: "Beta" }), { moves: [swordsDance()] });
+    const state = createBattle([a, a2], [b]);
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "switchOut")).toBe(true);
+    expect(s2.pendingReplacement[0]).toBe(true);
+
+    const r = replaceFainted(s2, 0, 1);
+    expect(r.ok).toBe(true);
+    expect(r.state.teams[0].active).toBe(1);
+  });
+
+  it("with an empty bench it just attacks", () => {
+    const uTurn = withMeta({ slug: "u-turn", name: "U-turn", type: "bug", power: 70 });
+    const { state } = duel({ aMon: { types: ["water"] }, aMoves: [uTurn], bMoves: [swordsDance()] });
+    const { state: s2, events } = playTurn(state, [attack, attack], scriptRng());
+    expect(events.some((e) => e.type === "switchOut")).toBe(false);
+    expect(s2.pendingReplacement[0]).toBe(false);
+  });
+});
+
+describe("the AI reads the new rules", () => {
+  it("won't pick a Fake Out it can no longer use", () => {
+    const fakeOut = withMeta(
+      { slug: "fake-out", name: "Fake Out", power: 40, priority: 3 },
+      { flinchChance: 100 }
+    );
+    const { a, b } = duel({ aMoves: [fakeOut, move()], bMoves: [swordsDance()] });
+    a.vol.turnsActive = 3;
+    const state = createBattle([a], [b]);
+    expect(chooseAiAction(state, 0, scriptRng()).moveIndex).toBe(1);
+  });
+
+  it("won't pick a disabled move", () => {
+    const { a, b } = duel({ aMoves: [move({ power: 120 }), move({ power: 40 })], bMoves: [swordsDance()] });
+    a.vol.disable = { moveIndex: 0, turns: 4 };
+    const state = createBattle([a], [b]);
+    expect(chooseAiAction(state, 0, scriptRng()).moveIndex).toBe(1);
+  });
+
+  it("won't pick a status move while taunted", () => {
+    const { a, b } = duel({ aMoves: [swordsDance(), move()], bMoves: [swordsDance()] });
+    a.vol.taunt = 3;
+    const state = createBattle([a], [b]);
+    expect(chooseAiAction(state, 0, scriptRng()).moveIndex).toBe(1);
   });
 });

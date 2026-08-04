@@ -137,7 +137,25 @@ latest version group, and an engine that grows toward statuses, stat stages,
 weather, hazards, items and abilities — items/abilities as a curated set
 first. `src/lib/sim.js` follows the same law as `battle.js`: every mechanic
 tested with hand-derived values, RNG injected so tests are exact, and the
-existing battle.js/typeChart.js files stay untouched. On the Battle tab, sim
+existing battle.js/typeChart.js files stay untouched.
+
+Everything that spans more than one turn landed in 2026-08: charge moves,
+recharge, rampage locks, confusion, trapping, Leech Seed, Wish, Future Sight,
+Perish Song, Yawn, Taunt/Encore/Disable, screens, Tailwind, Trick Room,
+Protect and Substitute. Two rules there are easy to "fix" into being wrong:
+
+- **Every counter ticks in one place, `endOfTurn`, in the order written at the
+  top of that function.** A Pokémon on 4 HP with a burn and a Wish incoming
+  lives or dies on that order. Don't reshuffle it to read more nicely.
+- **PokéAPI's `damage-raise` meta category means "damage, then change the
+  USER's stats" — even when the change is a drop.** That is why Draco Meteor
+  and Close Combat sit in the same bucket as Meteor Mash. `damage-lower` is
+  the one that points at the target. Reading the sign of the stat change
+  instead sends Power-Up Punch's boost to the opponent.
+
+Status moves ignore type immunity (Encore works on a Ghost), except Electric
+and Poison ones. That is deliberate and matches the games; the type chart
+gate is for attacks. On the Battle tab, sim
 results only enter the league when the player says yes to the post-battle
 prompt; battles started from the League tab (one-off matches and tourney
 rounds) are league events by nature and record automatically.
