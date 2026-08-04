@@ -41,6 +41,30 @@ turn by turn. Agreed scope, in landing order:
 4. **Kitchen-sink expansion, staged:** weather, entry hazards, held items,
    abilities. Items and abilities land as a curated set of the common ones
    first and grow from there — correctness over coverage.
+5. **Anything that spans more than one turn** (added 2026-08, after Joseph
+   pointed out the sim fired Solar Beam instantly and never locked Outrage in):
+   two-turn charge moves with semi-invulnerability, Power Herb, recharge moves,
+   rampage locks, confusion, momentum moves, partial trapping and the switch
+   block it applies, Leech Seed, Wish, Future Sight, Perish Song, Yawn, Taunt,
+   Encore, Disable, the screens, Tailwind, Trick Room, Protect, Substitute,
+   Fake Out, Focus Punch, Roost's grounding and the switch-out moves.
+
+### Still not modeled in the sim
+
+Deliberate gaps, in rough order of how much they'd be missed:
+
+- **Contact-triggered items and abilities** — Rocky Helmet, Rough Skin, Static,
+  Flame Body. PokéAPI carries no contact flag, so this needs a curated move
+  list first. It is also what stops Spiky Shield, King's Shield and Baneful
+  Bunker having their punish riders: they block the move and nothing more.
+- **Terrain** (Electric, Grassy, Misty, Psychic).
+- **Bide, infatuation, Torment, Imprison, Magic Coat, Baton Pass** and the
+  other one-off status moves — 128 of the 277 status moves still say "not in
+  the sim yet" in the log rather than pretending to work.
+- **Switch-out timing.** U-turn, Volt Switch and Flip Turn ask for the swap,
+  but the replacement arrives at the end of the turn instead of instantly, so
+  end-of-turn chip damage still lands on the Pokémon that left.
+- **Future Sight** ignores screens, items and crits when it lands.
 
 Sim battles can optionally be recorded in the league — the app asks after the
 battle ends; nothing is logged automatically.
