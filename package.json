@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
-    "refresh-dex": "node scripts/build-dex.mjs"
+    "refresh-dex": "node scripts/build-dex.mjs",
+    "refresh-flags": "node scripts/build-move-flags.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

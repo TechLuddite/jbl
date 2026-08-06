@@ -13,7 +13,8 @@ and is the single biggest remaining piece of work.
 
 **The calculator ignores held items, abilities, weather, stat stages and
 screens.** The modifier chain in `battle.js` has an `other` parameter ready for
-them; nothing feeds it yet.
+them; nothing feeds it yet. The sim does feed it — the calculator tab simply
+hasn't been given the controls.
 
 **One tourney format.** The league has a single-elimination knockout tourney
 (added 2026-08: each trainer fights with one league Pokémon at level 50, with
@@ -40,7 +41,8 @@ turn by turn. Agreed scope, in landing order:
    moves.
 4. **Kitchen-sink expansion, staged:** weather, entry hazards, held items,
    abilities. Items and abilities land as a curated set of the common ones
-   first and grow from there — correctness over coverage.
+   first and grow from there — correctness over coverage. (Grown a long way
+   in 2026-08; see 6 below.)
 5. **Anything that spans more than one turn** (added 2026-08, after Joseph
    pointed out the sim fired Solar Beam instantly and never locked Outrage in):
    two-turn charge moves with semi-invulnerability, Power Herb, recharge moves,
@@ -49,15 +51,35 @@ turn by turn. Agreed scope, in landing order:
    Encore, Disable, the screens, Tailwind, Trick Room, Protect, Substitute,
    Fake Out, Focus Punch, Roost's grounding and the switch-out moves.
 
+6. **The item and ability sets, properly** (added 2026-08, after Joseph
+   pointed out that most Pokémon had an ability the sim had never heard of).
+   25 abilities became ~130 and 11 items became ~75, all under the same rule:
+   modeled and hand-tested, or not offered. The unlock was move flags —
+   PokéAPI doesn't publish them, so `npm run refresh-flags` bakes them from a
+   second source into `src/data/move-flags.json`, the same way the dex is
+   baked. That gave the sim a contact flag and with it Static, Rough Skin,
+   Rocky Helmet, Tough Claws and the punish riders on Spiky Shield and
+   King's Shield.
+
 ### Still not modeled in the sim
 
 Deliberate gaps, in rough order of how much they'd be missed:
 
-- **Contact-triggered items and abilities** — Rocky Helmet, Rough Skin, Static,
-  Flame Body. PokéAPI carries no contact flag, so this needs a curated move
-  list first. It is also what stops Spiky Shield, King's Shield and Baneful
-  Bunker having their punish riders: they block the move and nothing more.
-- **Terrain** (Electric, Grassy, Misty, Psychic).
+- **The abilities that change what a Pokémon IS** — Illusion, Disguise, Ice
+  Face, Zen Mode, Imposter, Protean, Stance Change, Multitype. Each needs the
+  engine to swap types or forms mid-battle, which nothing else does yet.
+- **Magic Bounce and Magic Coat** — bouncing a status move back needs the
+  move to be re-run from the other side, which the move loop can't do.
+- **The absorbing abilities only read attacks.** Volt Absorb, Lightning Rod,
+  Storm Drain and Sap Sipper all sit in the damaging-move path, so an Electric
+  STATUS move — Thunder Wave — still lands on a Lightning Rod Pokémon. In the
+  real games it wouldn't.
+- **Trace, Forecast, Download's cousins** — abilities that copy or react to
+  another ability.
+- **Doubles-only abilities** are listed but marked as doing nothing, which is
+  correct for a one-on-one battle and would need doubles to be worth more.
+- **Terrain** (Electric, Grassy, Misty, Psychic) — and with it Protosynthesis,
+  Quark Drive and the four surge abilities.
 - **Bide, infatuation, Torment, Imprison, Magic Coat, Baton Pass** and the
   other one-off status moves — 128 of the 277 status moves still say "not in
   the sim yet" in the log rather than pretending to work.

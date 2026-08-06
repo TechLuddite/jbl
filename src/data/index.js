@@ -34,6 +34,34 @@ try {
   // Generated data absent — sample set stands in.
 }
 
+/**
+ * Move flags (contact, punch, sound...) ride in from `move-flags.json`, baked
+ * separately because PokéAPI doesn't publish them. Attaching them here means
+ * every move object the app hands the sim already knows whether it touches —
+ * which is what Static, Rocky Helmet and Iron Fist all key off.
+ *
+ * The sample moves have no slug, so they match on a slugified name instead.
+ */
+try {
+  const flagFile = Object.values(
+    import.meta.glob("./move-flags.json", { eager: true, import: "default" })
+  )[0];
+  if (flagFile) {
+    const bySlug = new Map();
+    for (const [flag, slugs] of Object.entries(flagFile)) {
+      for (const slug of slugs) {
+        if (!bySlug.has(slug)) bySlug.set(slug, []);
+        bySlug.get(slug).push(flag);
+      }
+    }
+    const slugOf = (m) => m.slug ?? m.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    ALL_MOVES = ALL_MOVES.map((m) => ({ ...m, flags: bySlug.get(slugOf(m)) ?? [] }));
+  }
+} catch {
+  // No flag file — moves simply carry no flags, and the abilities that read
+  // them stay quiet rather than guessing.
+}
+
 // The damage calculator only wants moves that deal damage; the sim wants
 // everything, status moves included. The sample set is damaging-only, so on a
 // fresh clone the two lists are identical.

@@ -28,18 +28,31 @@ export function newSlot(pokemonId) {
   return { pokemonId: p.id, level: 50, moveNames: defaultMoveNames(p), item: "", ability };
 }
 
-/** Ability choices for a slot: the dex entry's real ones, or the whole
- *  curated list on the sample set (u-pick spirit). */
+/**
+ * Ability choices for a slot: the dex entry's real ones, or the whole modeled
+ * list on the sample set (u-pick spirit).
+ *
+ * An ability the sim doesn't model yet is still listed, still says so, and is
+ * still pickable — the engine ignores it. Hiding it would be worse: you'd have
+ * no way of telling a Pokémon whose ability does nothing from one whose
+ * ability the sim never heard of.
+ */
 export function abilityOptions(p) {
   if (p.abilities?.length) {
-    return p.abilities.map((a) => ({
-      slug: a.slug,
-      label: (ABILITIES[a.slug]?.name ?? titleish(a.slug)) +
-        (a.hidden ? " (hidden)" : "") +
-        (ABILITIES[a.slug] ? "" : " · not in sim yet"),
-    }));
+    return p.abilities.map((a) => {
+      const known = ABILITIES[a.slug];
+      const name = (known?.name ?? titleish(a.slug)) + (a.hidden ? " (hidden)" : "");
+      return {
+        slug: a.slug,
+        group: known ? "This Pokémon's abilities" : "Not in the sim yet",
+        label: known ? `${name} · ${known.desc}` : `${name} · not in the sim yet`,
+        search: `${name} ${known?.desc ?? ""}`,
+      };
+    });
   }
-  return Object.entries(ABILITIES).map(([slug, a]) => ({ slug, label: a.name }));
+  return Object.entries(ABILITIES).map(([slug, a]) => ({
+    slug, group: a.group, label: `${a.name} · ${a.desc}`, search: `${a.name} ${a.desc}`,
+  }));
 }
 
 export const titleish = (slug) => slug.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
@@ -502,7 +515,7 @@ export function EventLine({ e, sideNames }) {
       const amount = Math.abs(e.change) === 1 ? "" : Math.abs(e.change) === 2 ? " sharply" : " drastically";
       return <div className="step-body">{e.name}'s {e.stat.toUpperCase()} {dir}{amount} (now {e.now > 0 ? "+" : ""}{e.now}).</div>;
     }
-    case "heal": return <div className="step-body">{e.name} healed {e.amount} HP.</div>;
+    case "heal": return <div className="step-body">{e.name} healed {e.amount} HP{e.via ? ` with ${e.via}` : ""}.</div>;
     case "drain": return <div className="step-body">{e.name} drained {e.amount} HP back.</div>;
     case "recoil": return <div className="step-body">{e.name} took {e.amount} recoil damage → {e.hpLeft} HP</div>;
     case "switch": return <div className="step-body">{sideNames[e.side]} called back {e.out} and sent in <strong>{e.in}</strong>.</div>;
@@ -523,6 +536,11 @@ export function EventLine({ e, sideNames }) {
     case "ability": return <div className="step-body">{e.name}'s {e.ability}!</div>;
     case "absorb": return <div className="step-body">{e.name}'s {e.ability} soaked up the move{e.amount ? ` and healed ${e.amount} HP` : ""}.</div>;
     case "endure": return <div className="step-body">{e.name} hung on at 1 HP thanks to its {e.via}!</div>;
+    case "moveBlocked": return <div className="step-body">{e.move} didn't touch {e.name} — {e.by}.</div>;
+    case "statusBlocked": return <div className="step-body">{e.name}'s {e.by} kept the status off it.</div>;
+    case "statsBlocked": return <div className="step-body">{e.name}'s {e.by} wouldn't let its {e.stat.toUpperCase()} drop.</div>;
+    case "hazardIgnored": return <div className="step-body">{e.name}'s {e.item} took it straight over the hazards.</div>;
+    case "cured": return <div className="step-body">{e.name}'s {e.by} cleared its status.</div>;
     case "balloonPop": return <div className="step-body">{e.name}'s Air Balloon popped!</div>;
 
     /* ---- charging, recharging and being locked in ---- */
@@ -533,7 +551,10 @@ export function EventLine({ e, sideNames }) {
       }[e.invuln];
       return <div className="step-body">{e.name} {where ?? `started charging ${e.move}`}{where ? "!" : "."} {where ? `Nothing can reach it until ${e.move} lands.` : ""}</div>;
     }
-    case "itemUsed": return <div className="step-body">{e.name}'s {e.item} let it attack straight away!</div>;
+    case "itemUsed":
+      return e.item === "Power Herb"
+        ? <div className="step-body">{e.name}'s Power Herb let it attack straight away!</div>
+        : <div className="step-body">{e.name} used up its {e.item}.</div>;
     case "mustRecharge": return <div className="step-body">{e.name} has to rest next turn.</div>;
     case "recharge": return <div className="step-body">{e.name} is getting its breath back and can't move.</div>;
     case "rampageEnd":

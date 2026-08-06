@@ -19,6 +19,33 @@
 
 export const CHANGELOG = [
   {
+    date: "2026-08-06",
+    title: "Abilities and items, properly this time",
+    credit: "Spotted by Joseph",
+    intro:
+      "Most Pokémon had an ability the sim had never heard of, and there were " +
+      "only eleven items to choose from. Now there are over a hundred abilities " +
+      "and more than seventy items, and every one of them actually does " +
+      "something in a battle.",
+    changes: [
+      { kind: "new", text: "Static, Flame Body, Poison Point, Rough Skin, Iron Barbs and Effect Spore all work now. Touch a Pikachu and you might come away paralysed." },
+      { kind: "new", text: "Rocky Helmet hurts anything that touches its holder, and Spiky Shield, King's Shield and Baneful Bunker finally punish whatever hits them instead of just blocking it." },
+      { kind: "new", text: "Swift Swim, Chlorophyll, Sand Rush and Slush Rush double your Speed in the right weather. Sand Veil and Snow Cloak make you harder to hit." },
+      { kind: "new", text: "Sheer Force, Tinted Lens, Iron Fist, Strong Jaw, Tough Claws, Sharpness, Analytic, Sniper, Serene Grace, Skill Link, Hustle and Technician's other relatives all change how hard you hit." },
+      { kind: "new", text: "Solid Rock, Filter, Multiscale, Fur Coat, Ice Scales, Heatproof and Fluffy all change how hard you get hit." },
+      { kind: "new", text: "Lightning Rod, Storm Drain, Motor Drive, Sap Sipper, Earth Eater and Well-Baked Body swallow a whole type of move and give you a boost for it. Soundproof and Bulletproof just refuse." },
+      { kind: "new", text: "Moxie, Beast Boost, Defiant, Competitive, Weak Armor, Steadfast, Anger Point, Justified, Rattled, Stamina and Berserk all react to what just happened to you." },
+      { kind: "new", text: "Prankster sends status moves first — unless the other Pokémon is a Dark type, which ignores them completely. Gale Wings, Triage and Stall change the order too." },
+      { kind: "new", text: "Clear Body, Hyper Cutter, Big Pecks and Keen Eye stop the other side lowering your stats. Contrary turns every stat change upside down and Simple doubles it." },
+      { kind: "new", text: "Mold Breaker walks straight through Levitate, Sturdy and anything else in its way. Wonder Guard only lets super effective moves through." },
+      { kind: "new", text: "There's a boosting item for all eighteen types — Charcoal, Magnet, Mystic Water and the rest — and a berry that halves one super effective hit of each type." },
+      { kind: "new", text: "Rocky Helmet, Heavy-Duty Boots, Weakness Policy, Safety Goggles, Light Clay, Quick Claw, Flame Orb, Toxic Orb, Black Sludge, Lum Berry, Shell Bell, Scope Lens, King's Rock, Bright Powder, White Herb, Mental Herb, Metronome and the four weather rocks are all in." },
+      { kind: "new", text: "The held item and ability menus now have a search box at the top, like the Pokémon and move menus. Type what you want instead of scrolling — and you can search what an item does, so typing \"burn\" finds the Flame Orb." },
+      { kind: "new", text: "Every item and ability in the menus says what it does right next to its name." },
+      { kind: "new", text: "Abilities like Pickup and Run Away are listed honestly as doing nothing in a one-on-one battle, rather than looking broken." },
+    ],
+  },
+  {
     date: "2026-08-04",
     title: "This page, and a way to report things",
     changes: [
