@@ -24,9 +24,10 @@ export function Field({ label, children }) {
  * search box right on top of the list. Custom rather than a native select
  * because you can't put an input inside one.
  *
- * `groups` is [{ label?, items: [{ key, label, search? }] }] — a group label
- * renders as a non-selectable heading, like an optgroup. Matching runs on
- * `search` when given (so "Flamethrower · 90" still matches by name only).
+ * `groups` is [{ label?, items: [{ key, label, search?, short? }] }] — a group
+ * label renders as a non-selectable heading, like an optgroup. Matching runs on
+ * `search` when given (so "Flamethrower · 90" still matches by name only), and
+ * the closed button shows `short` when the row label is too long to sit in it.
  */
 function SearchPick({ groups, value, onChange, placeholder, fallback, style }) {
   const [open, setOpen] = useState(false);
@@ -106,7 +107,7 @@ function SearchPick({ groups, value, onChange, placeholder, fallback, style }) {
         className="fld pokepick-btn"
         onClick={() => (open ? setOpen(false) : openPanel())}
       >
-        {current?.label ?? fallback}
+        <span className="pokepick-label">{current?.short ?? current?.label ?? fallback}</span>
         <span className="pokepick-caret">▾</span>
       </button>
       {open && (
@@ -186,6 +187,69 @@ export function MoveSelect({ moves, value, onChange, allowEmpty = false, emptyLa
       onChange={onChange}
       placeholder="Start typing a move…"
       fallback="Pick a move"
+      style={style}
+    />
+  );
+}
+
+/**
+ * The held-item picker. There are seventy-odd items now, so it gets the same
+ * search-on-top treatment as the Pokémon and move lists — a plain select of
+ * that length is unusable on a phone. Items are grouped the way `ITEMS` groups
+ * them, and the description is searchable too, so typing "burn" finds the
+ * Flame Orb without knowing its name.
+ */
+export function ItemSelect({ items, value, onChange, style }) {
+  const groups = [{ items: [{ key: "", label: "— no item —", search: "no item none" }] }];
+  const byGroup = new Map();
+  for (const [slug, item] of Object.entries(items)) {
+    if (!byGroup.has(item.group)) byGroup.set(item.group, []);
+    byGroup.get(item.group).push({
+      key: slug,
+      label: `${item.name} · ${item.desc}`,
+      short: item.name,
+      search: `${item.name} ${item.desc}`,
+    });
+  }
+  for (const [label, list] of byGroup) groups.push({ label, items: list });
+
+  return (
+    <SearchPick
+      groups={groups}
+      value={value}
+      onChange={onChange}
+      placeholder="Start typing an item…"
+      fallback="Pick an item"
+      style={style}
+    />
+  );
+}
+
+/**
+ * The ability picker. `options` comes from abilityOptions() — a Pokémon's own
+ * abilities normally, the whole modeled list on the sample set — and already
+ * carries the "not in sim yet" marker.
+ */
+export function AbilitySelect({ options, value, onChange, style }) {
+  const groups = [{ items: [{ key: "", label: "— no ability —", search: "no ability none" }] }];
+  const byGroup = new Map();
+  for (const opt of options) {
+    const group = opt.group ?? "";
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push({
+      key: opt.slug, label: opt.label, short: opt.short ?? opt.label.split(" · ")[0],
+      search: opt.search ?? opt.label,
+    });
+  }
+  for (const [label, list] of byGroup) groups.push({ label: label || undefined, items: list });
+
+  return (
+    <SearchPick
+      groups={groups}
+      value={value}
+      onChange={onChange}
+      placeholder="Start typing an ability…"
+      fallback="Pick an ability"
       style={style}
     />
   );

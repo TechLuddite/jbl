@@ -95,11 +95,15 @@ function freshVolatiles() {
     disable: null,         // { moveIndex, turns }
     sub: 0,                // Substitute HP remaining
     protect: false,        // protected itself this turn
+    protectedWith: null,   // which shield — they punish differently
     protectStreak: 0,      // consecutive protects, for the failure odds
     roosted: false,        // gave up its Flying type for the turn
     lastMoveIndex: null,   // what Encore and Disable latch onto
     turnsActive: 0,        // 1 on the turn it arrives — Fake Out reads this
     tookDamage: false,     // this turn, for Focus Punch
+    unburdened: false,     // used up its held item, so Unburden is live
+    repeat: null,          // { slug, uses } — Metronome's escalating boost
+    unnerved: false,       // an Unnerve foe is staring at it, so no berries
   };
 }
 
@@ -122,7 +126,7 @@ export function createBattler(pokemon, {
     maxHP: stats.hp,
     hp: stats.hp,
     moves: moves.map((m) => ({ move: m, pp: m.pp ?? 10 })),
-    item,                  // curated slug from ITEMS, or null
+    item: item && ITEMS[item] ? item : null,                 // unmodeled → null
     ability: ability && ABILITIES[ability] ? ability : null, // unmodeled → null
     status: null,          // burn | paralysis | sleep | freeze | poison | toxic
     sleepTurns: 0,         // turns of sleep remaining
@@ -190,15 +194,22 @@ export function stageMult(stage, base = 2) {
 }
 
 /**
- * Effective Speed: stage-modified, then Tailwind, then Choice Scarf, then
- * halved by paralysis. Flooring after each step, so the order is load-bearing.
- * `team` is optional — without it Tailwind simply isn't in play.
+ * Effective Speed: stage-modified, then the Speed abilities, then Tailwind,
+ * then Choice Scarf, then halved by paralysis. Flooring after each step, so
+ * the order is load-bearing.
+ *
+ * `team` is optional — without it Tailwind simply isn't in play — and so is
+ * `weather`, which is what Swift Swim and the other three read.
  */
-export function effectiveSpeed(b, team = null) {
+export function effectiveSpeed(b, team = null, weather = null) {
   let spe = Math.floor(b.stats.spe * stageMult(b.stages.spe));
+  if (weather && WEATHER_SPEED_ABILITY[b.ability] === weather) spe = Math.floor(spe * 2);
+  if (b.ability === "quick-feet" && b.status) spe = Math.floor(spe * 1.5);
+  if (b.ability === "unburden" && b.vol.unburdened) spe = Math.floor(spe * 2);
   if (team?.tailwind > 0) spe = Math.floor(spe * 2);
   if (b.item === "choice-scarf") spe = Math.floor(spe * 1.5);
-  if (b.status === "paralysis") spe = Math.floor(spe / 2);
+  // Quick Feet shrugs off the paralysis Speed cut as well as boosting.
+  if (b.status === "paralysis" && b.ability !== "quick-feet") spe = Math.floor(spe / 2);
   return spe;
 }
 
@@ -212,9 +223,16 @@ function defendingTypes(b) {
   return grounded.length ? grounded : ["normal"]; // pure Flying becomes Normal
 }
 
-/** Stage-modified attacking/defending stat, with the crit exemptions. */
-function battleStat(b, key, { crit = false, attacking = false } = {}) {
-  let stage = b.stages[key];
+/** Nothing in the formula may reach zero — a 0 attack stat divides by nothing. */
+const def0 = (n) => Math.max(1, n);
+
+/**
+ * Stage-modified attacking/defending stat, with the crit exemptions.
+ * `ignoreStages` is Unaware on the other side: it doesn't reset the stages,
+ * it just refuses to look at them.
+ */
+function battleStat(b, key, { crit = false, attacking = false, ignoreStages = false } = {}) {
+  let stage = ignoreStages ? 0 : b.stages[key];
   // A crit ignores the attacker's drops and the defender's boosts.
   if (crit) stage = attacking ? Math.max(0, stage) : Math.min(0, stage);
   return Math.floor(b.stats[key] * stageMult(stage));
@@ -222,25 +240,35 @@ function battleStat(b, key, { crit = false, attacking = false } = {}) {
 
 /**
  * The attacking stat fed to the damage formula. Modifier order is fixed:
- * stages → Choice item ×1.5 → Huge/Pure Power ×2 → Guts ×1.5, flooring after
- * each step. Tests derive their numbers from exactly this order.
+ * stages → Choice item ×1.5 → Huge/Pure Power ×2 → Guts ×1.5 → Hustle ×1.5 →
+ * Solar Power ×1.5 → Defeatist ×0.5, flooring after each step. Tests derive
+ * their numbers from exactly this order.
  */
-function attackStat(user, key, { crit, isPhysical }) {
-  let atk = battleStat(user, key, { crit, attacking: true });
+function attackStat(user, key, { crit, isPhysical, weather = null, ignoreStages = false }) {
+  let atk = battleStat(user, key, { crit, attacking: true, ignoreStages });
   if (isPhysical && user.item === "choice-band") atk = Math.floor(atk * 1.5);
   if (!isPhysical && user.item === "choice-specs") atk = Math.floor(atk * 1.5);
   if (isPhysical && (user.ability === "huge-power" || user.ability === "pure-power")) atk *= 2;
   if (isPhysical && user.ability === "guts" && user.status) atk = Math.floor(atk * 1.5);
-  return atk;
+  if (isPhysical && user.ability === "hustle") atk = Math.floor(atk * 1.5);
+  if (!isPhysical && user.ability === "solar-power" && weather === "sun") atk = Math.floor(atk * 1.5);
+  if (user.ability === "defeatist" && user.hp * 2 <= user.maxHP) atk = Math.floor(atk * 0.5);
+  return def0(atk);
 }
 
-/** The defending stat: stages → Assault Vest → weather boosts, floored each step. */
-function defenseStat(foe, key, { crit, weather }) {
-  let def = battleStat(foe, key, { crit, attacking: false });
+/**
+ * The defending stat: stages → Assault Vest → Fur Coat → Marvel Scale →
+ * weather boosts, floored each step. `ability` is the defender's ability as
+ * the attacker sees it, so Mold Breaker walks through Fur Coat.
+ */
+function defenseStat(foe, key, { crit, weather, ignoreStages = false, ability = foe.ability }) {
+  let def = battleStat(foe, key, { crit, attacking: false, ignoreStages });
   if (key === "spd" && foe.item === "assault-vest") def = Math.floor(def * 1.5);
+  if (key === "def" && ability === "fur-coat") def *= 2;
+  if (key === "def" && ability === "marvel-scale" && foe.status) def = Math.floor(def * 1.5);
   if (key === "spd" && weather === "sand" && foe.pokemon.types.includes("rock")) def = Math.floor(def * 1.5);
   if (key === "def" && weather === "snow" && foe.pokemon.types.includes("ice")) def = Math.floor(def * 1.5);
-  return def;
+  return def0(def);
 }
 
 /** Statuses a type simply cannot have. */
@@ -286,59 +314,351 @@ function statChangesHitUser(move) {
 /* ------------------------------------------------- items & abilities ----- */
 
 /**
- * The curated held items. Every entry here is fully modeled and tested;
- * anything not on this list simply cannot be picked.
+ * The held items the sim offers. Every entry here is fully modeled and covered
+ * by a test; anything not on this list simply cannot be picked. `group` is
+ * what the picker sorts them under.
+ *
+ * The type-boosting items and the type-resist berries look like a lot of
+ * entries for very little code, and that is exactly the point: one mechanic
+ * each, eighteen slots filled.
  */
 export const ITEMS = {
-  "leftovers":    { name: "Leftovers",    desc: "Heals 1/16 max HP every turn." },
-  "sitrus-berry": { name: "Sitrus Berry", desc: "Heals 1/4 max HP once, below half." },
-  "choice-band":  { name: "Choice Band",  desc: "1.5× Attack, but locked into one move." },
-  "choice-specs": { name: "Choice Specs", desc: "1.5× Sp. Atk, but locked into one move." },
-  "choice-scarf": { name: "Choice Scarf", desc: "1.5× Speed, but locked into one move." },
-  "life-orb":     { name: "Life Orb",     desc: "1.3× damage, costs 1/10 max HP per attack." },
-  "focus-sash":   { name: "Focus Sash",   desc: "Survive a KO from full HP with 1 HP. One use." },
-  "expert-belt":  { name: "Expert Belt",  desc: "1.2× on super effective hits." },
-  "assault-vest": { name: "Assault Vest", desc: "1.5× Sp. Def." },
-  "air-balloon":  { name: "Air Balloon",  desc: "Immune to Ground until hit." },
-  "power-herb":   { name: "Power Herb",   desc: "Skips the charge turn of a two-turn move. One use." },
+  // --- recovery ---
+  "leftovers":    { group: "Recovery", name: "Leftovers",    desc: "Heals 1/16 max HP every turn." },
+  "black-sludge": { group: "Recovery", name: "Black Sludge", desc: "Heals a Poison type 1/16 a turn; hurts anything else 1/8." },
+  "sitrus-berry": { group: "Recovery", name: "Sitrus Berry", desc: "Heals 1/4 max HP once, below half." },
+  "oran-berry":   { group: "Recovery", name: "Oran Berry",   desc: "Heals 10 HP once, below half." },
+  "lum-berry":    { group: "Recovery", name: "Lum Berry",    desc: "Cures any status or confusion the moment it lands. One use." },
+  "shell-bell":   { group: "Recovery", name: "Shell Bell",   desc: "Heals 1/8 of the damage it deals." },
+
+  // --- attacking ---
+  "choice-band":  { group: "Attack",  name: "Choice Band",   desc: "1.5× Attack, but locked into one move." },
+  "choice-specs": { group: "Attack",  name: "Choice Specs",  desc: "1.5× Sp. Atk, but locked into one move." },
+  "choice-scarf": { group: "Attack",  name: "Choice Scarf",  desc: "1.5× Speed, but locked into one move." },
+  "life-orb":     { group: "Attack",  name: "Life Orb",      desc: "1.3× damage, costs 1/10 max HP per attack." },
+  "expert-belt":  { group: "Attack",  name: "Expert Belt",   desc: "1.2× on super effective hits." },
+  "muscle-band":  { group: "Attack",  name: "Muscle Band",   desc: "1.1× on physical moves." },
+  "wise-glasses": { group: "Attack",  name: "Wise Glasses",  desc: "1.1× on special moves." },
+  "scope-lens":   { group: "Attack",  name: "Scope Lens",    desc: "Critical hits come one stage more often." },
+  "razor-claw":   { group: "Attack",  name: "Razor Claw",    desc: "Critical hits come one stage more often." },
+  "kings-rock":   { group: "Attack",  name: "King's Rock",   desc: "10% chance to make the target flinch." },
+  "metronome":    { group: "Attack",  name: "Metronome",     desc: "Same move again and again: +20% power each time, up to 2×." },
+  "big-root":     { group: "Attack",  name: "Big Root",      desc: "Draining moves heal 1.3× as much." },
+  "power-herb":   { group: "Attack",  name: "Power Herb",    desc: "Skips the charge turn of a two-turn move. One use." },
+
+  // --- defending ---
+  "assault-vest":      { group: "Defence", name: "Assault Vest",      desc: "1.5× Sp. Def." },
+  "focus-sash":        { group: "Defence", name: "Focus Sash",        desc: "Survive a KO from full HP with 1 HP. One use." },
+  "air-balloon":       { group: "Defence", name: "Air Balloon",       desc: "Immune to Ground until hit." },
+  "rocky-helmet":      { group: "Defence", name: "Rocky Helmet",      desc: "Anything that touches it loses 1/6 max HP." },
+  "heavy-duty-boots":  { group: "Defence", name: "Heavy-Duty Boots",  desc: "Walks straight past Stealth Rock, Spikes and Sticky Web." },
+  "bright-powder":     { group: "Defence", name: "Bright Powder",     desc: "Moves aimed at it are 10% likelier to miss." },
+  "safety-goggles":    { group: "Defence", name: "Safety Goggles",    desc: "Immune to powder moves and to the sandstorm." },
+  "weakness-policy":   { group: "Defence", name: "Weakness Policy",   desc: "Taking a super effective hit gives +2 Attack and +2 Sp. Atk. One use." },
+  "white-herb":        { group: "Defence", name: "White Herb",        desc: "Undoes any lowered stats, once." },
+  "mental-herb":       { group: "Defence", name: "Mental Herb",       desc: "Shakes off Taunt, Encore or Disable, once." },
+
+  // --- status and the field ---
+  "flame-orb":   { group: "Field", name: "Flame Orb",   desc: "Burns its own holder at the end of the turn." },
+  "toxic-orb":   { group: "Field", name: "Toxic Orb",   desc: "Badly poisons its own holder at the end of the turn." },
+  "light-clay":  { group: "Field", name: "Light Clay",  desc: "Reflect and Light Screen last 8 turns instead of 5." },
+  "damp-rock":   { group: "Field", name: "Damp Rock",   desc: "Rain it sets up lasts 8 turns." },
+  "heat-rock":   { group: "Field", name: "Heat Rock",   desc: "Sun it sets up lasts 8 turns." },
+  "smooth-rock": { group: "Field", name: "Smooth Rock", desc: "Sandstorm it sets up lasts 8 turns." },
+  "icy-rock":    { group: "Field", name: "Icy Rock",    desc: "Snow it sets up lasts 8 turns." },
+  "quick-claw":  { group: "Field", name: "Quick Claw",  desc: "20% chance to move first whatever the Speed." },
+};
+
+/** Type-boosting held items: 1.2× on that type. One line each, eighteen types. */
+const TYPE_BOOST_ITEM = {
+  "charcoal": "fire", "mystic-water": "water", "miracle-seed": "grass",
+  "magnet": "electric", "never-melt-ice": "ice", "black-belt": "fighting",
+  "poison-barb": "poison", "soft-sand": "ground", "sharp-beak": "flying",
+  "twisted-spoon": "psychic", "silver-powder": "bug", "hard-stone": "rock",
+  "spell-tag": "ghost", "dragon-fang": "dragon", "black-glasses": "dark",
+  "metal-coat": "steel", "silk-scarf": "normal", "fairy-feather": "fairy",
 };
 
 /**
- * The curated abilities. Same rule: modeled and tested, or not offered.
- * Dex entries may carry abilities outside this set — the UI marks those as
- * not in the sim yet and the engine ignores them.
+ * Type-resist berries: eaten on the way in to halve one super effective hit.
+ * Chilan Berry is the odd one — Normal is never super effective, so it halves
+ * any Normal move at all.
+ */
+const RESIST_BERRY = {
+  "occa-berry": "fire", "passho-berry": "water", "wacan-berry": "electric",
+  "rindo-berry": "grass", "yache-berry": "ice", "chople-berry": "fighting",
+  "kebia-berry": "poison", "shuca-berry": "ground", "coba-berry": "flying",
+  "payapa-berry": "psychic", "tanga-berry": "bug", "charti-berry": "rock",
+  "kasib-berry": "ghost", "haban-berry": "dragon", "colbur-berry": "dark",
+  "babiri-berry": "steel", "roseli-berry": "fairy", "chilan-berry": "normal",
+};
+
+const TYPE_ITEM_NAME = {
+  fire: "Charcoal", water: "Mystic Water", grass: "Miracle Seed",
+  electric: "Magnet", ice: "Never-Melt Ice", fighting: "Black Belt",
+  poison: "Poison Barb", ground: "Soft Sand", flying: "Sharp Beak",
+  psychic: "Twisted Spoon", bug: "Silver Powder", rock: "Hard Stone",
+  ghost: "Spell Tag", dragon: "Dragon Fang", dark: "Black Glasses",
+  steel: "Metal Coat", normal: "Silk Scarf", fairy: "Fairy Feather",
+};
+
+const BERRY_NAME = {
+  fire: "Occa Berry", water: "Passho Berry", electric: "Wacan Berry",
+  grass: "Rindo Berry", ice: "Yache Berry", fighting: "Chople Berry",
+  poison: "Kebia Berry", ground: "Shuca Berry", flying: "Coba Berry",
+  psychic: "Payapa Berry", bug: "Tanga Berry", rock: "Charti Berry",
+  ghost: "Kasib Berry", dragon: "Haban Berry", dark: "Colbur Berry",
+  steel: "Babiri Berry", fairy: "Roseli Berry", normal: "Chilan Berry",
+};
+
+for (const [slug, type] of Object.entries(TYPE_BOOST_ITEM)) {
+  ITEMS[slug] = { group: "Type boosters", name: TYPE_ITEM_NAME[type], desc: `1.2× on ${type} moves.` };
+}
+for (const [slug, type] of Object.entries(RESIST_BERRY)) {
+  ITEMS[slug] = {
+    group: "Type berries",
+    name: BERRY_NAME[type],
+    desc: type === "normal"
+      ? "Halves one Normal move. One use."
+      : `Halves one super effective ${type} move. One use.`,
+  };
+}
+
+/** Every berry the sim knows about — Unnerve stops all of them. */
+const BERRIES = new Set(["sitrus-berry", "oran-berry", "lum-berry", ...Object.keys(RESIST_BERRY)]);
+
+/**
+ * The abilities the sim offers. Same rule as the items: modeled and hand-tested,
+ * or not offered at all. Dex entries carry abilities outside this set — the UI
+ * marks those as not in the sim yet and the engine ignores them rather than
+ * guessing at what they do.
+ *
+ * `noop: true` means the ability is fully accounted for and genuinely does
+ * nothing in a one-on-one battle (Pickup, Telepathy and friends only matter in
+ * doubles or out in the overworld). Those are honest entries, not stubs.
  */
 export const ABILITIES = {
-  "intimidate":   { name: "Intimidate",   desc: "Lowers the foe's Attack on entry." },
-  "levitate":     { name: "Levitate",     desc: "Immune to Ground moves." },
-  "huge-power":   { name: "Huge Power",   desc: "Doubles Attack." },
-  "pure-power":   { name: "Pure Power",   desc: "Doubles Attack." },
-  "guts":         { name: "Guts",         desc: "1.5× Attack when statused; burn doesn't halve." },
-  "speed-boost":  { name: "Speed Boost",  desc: "+1 Speed every turn." },
-  "sturdy":       { name: "Sturdy",       desc: "Survive a KO from full HP with 1 HP." },
-  "technician":   { name: "Technician",   desc: "1.5× power on moves of 60 power or less." },
-  "adaptability": { name: "Adaptability", desc: "STAB is 2× instead of 1.5×." },
-  "thick-fat":    { name: "Thick Fat",    desc: "Halves Fire and Ice damage taken." },
-  "magic-guard":  { name: "Magic Guard",  desc: "Only direct attacks deal damage." },
-  "water-absorb": { name: "Water Absorb", desc: "Heals 1/4 from Water moves instead of damage." },
-  "volt-absorb":  { name: "Volt Absorb",  desc: "Heals 1/4 from Electric moves instead of damage." },
-  "flash-fire":   { name: "Flash Fire",   desc: "Immune to Fire moves." },
-  "regenerator":  { name: "Regenerator",  desc: "Heals 1/3 max HP on switching out." },
-  "blaze":        { name: "Blaze",        desc: "1.5× Fire power below 1/3 HP." },
-  "torrent":      { name: "Torrent",      desc: "1.5× Water power below 1/3 HP." },
-  "overgrow":     { name: "Overgrow",     desc: "1.5× Grass power below 1/3 HP." },
-  "swarm":        { name: "Swarm",        desc: "1.5× Bug power below 1/3 HP." },
-  "drizzle":      { name: "Drizzle",      desc: "Summons rain on entry." },
-  "drought":      { name: "Drought",      desc: "Summons sun on entry." },
-  "sand-stream":  { name: "Sand Stream",  desc: "Summons a sandstorm on entry." },
-  "snow-warning": { name: "Snow Warning", desc: "Summons snow on entry." },
-  "own-tempo":    { name: "Own Tempo",    desc: "Cannot be confused." },
-  "inner-focus":  { name: "Inner Focus",  desc: "Cannot be made to flinch." },
+  /* --- entry --- */
+  "intimidate":   { group: "On entry", name: "Intimidate",   desc: "Lowers the foe's Attack on entry." },
+  "download":     { group: "On entry", name: "Download",     desc: "On entry, +1 to whichever attack the foe defends worse against." },
+  "drizzle":      { group: "Weather",  name: "Drizzle",      desc: "Summons rain on entry." },
+  "drought":      { group: "Weather",  name: "Drought",      desc: "Summons sun on entry." },
+  "sand-stream":  { group: "Weather",  name: "Sand Stream",  desc: "Summons a sandstorm on entry." },
+  "snow-warning": { group: "Weather",  name: "Snow Warning", desc: "Summons snow on entry." },
+
+  /* --- weather --- */
+  "swift-swim":   { group: "Weather", name: "Swift Swim",   desc: "Doubles Speed in rain." },
+  "chlorophyll":  { group: "Weather", name: "Chlorophyll",  desc: "Doubles Speed in sun." },
+  "sand-rush":    { group: "Weather", name: "Sand Rush",    desc: "Doubles Speed in a sandstorm, and the sand doesn't hurt it." },
+  "slush-rush":   { group: "Weather", name: "Slush Rush",   desc: "Doubles Speed in snow." },
+  "sand-veil":    { group: "Weather", name: "Sand Veil",    desc: "1.25× evasion in a sandstorm, and the sand doesn't hurt it." },
+  "snow-cloak":   { group: "Weather", name: "Snow Cloak",   desc: "1.25× evasion in snow." },
+  "sand-force":   { group: "Weather", name: "Sand Force",   desc: "1.3× Rock, Ground and Steel power in a sandstorm." },
+  "solar-power":  { group: "Weather", name: "Solar Power",  desc: "1.5× Sp. Atk in sun, but it loses 1/8 max HP a turn." },
+  "rain-dish":    { group: "Weather", name: "Rain Dish",    desc: "Heals 1/16 max HP a turn in rain." },
+  "ice-body":     { group: "Weather", name: "Ice Body",     desc: "Heals 1/16 max HP a turn in snow." },
+  "dry-skin":     { group: "Weather", name: "Dry Skin",     desc: "Heals in rain, burns in sun, drinks Water moves, and Fire hurts more." },
+  "leaf-guard":   { group: "Weather", name: "Leaf Guard",   desc: "Cannot be given a status while the sun is out." },
+  "hydration":    { group: "Weather", name: "Hydration",    desc: "Shakes off any status at the end of a turn in rain." },
+  "air-lock":     { group: "Weather", name: "Air Lock",     desc: "Switches the weather off while it is on the field." },
+  "cloud-nine":   { group: "Weather", name: "Cloud Nine",   desc: "Switches the weather off while it is on the field." },
+
+  /* --- damage dealt --- */
+  "huge-power":   { group: "Damage", name: "Huge Power",   desc: "Doubles Attack." },
+  "pure-power":   { group: "Damage", name: "Pure Power",   desc: "Doubles Attack." },
+  "guts":         { group: "Damage", name: "Guts",         desc: "1.5× Attack when statused; burn doesn't halve." },
+  "technician":   { group: "Damage", name: "Technician",   desc: "1.5× power on moves of 60 power or less." },
+  "adaptability": { group: "Damage", name: "Adaptability", desc: "STAB is 2× instead of 1.5×." },
+  "blaze":        { group: "Damage", name: "Blaze",        desc: "1.5× Fire power below 1/3 HP." },
+  "torrent":      { group: "Damage", name: "Torrent",      desc: "1.5× Water power below 1/3 HP." },
+  "overgrow":     { group: "Damage", name: "Overgrow",     desc: "1.5× Grass power below 1/3 HP." },
+  "swarm":        { group: "Damage", name: "Swarm",        desc: "1.5× Bug power below 1/3 HP." },
+  "sheer-force":  { group: "Damage", name: "Sheer Force",  desc: "1.3× power, but the move's extra effect never happens." },
+  "tinted-lens":  { group: "Damage", name: "Tinted Lens",  desc: "Doubles damage on moves that aren't very effective." },
+  "iron-fist":    { group: "Damage", name: "Iron Fist",    desc: "1.2× power on punching moves." },
+  "strong-jaw":   { group: "Damage", name: "Strong Jaw",   desc: "1.5× power on biting moves." },
+  "tough-claws":  { group: "Damage", name: "Tough Claws",  desc: "1.3× power on moves that make contact." },
+  "sharpness":    { group: "Damage", name: "Sharpness",    desc: "1.5× power on slicing moves." },
+  "mega-launcher":{ group: "Damage", name: "Mega Launcher",desc: "1.5× power on pulse and aura moves." },
+  "punk-rock":    { group: "Damage", name: "Punk Rock",    desc: "1.3× power on sound moves, and halves sound damage taken." },
+  "reckless":     { group: "Damage", name: "Reckless",     desc: "1.2× power on moves that hurt the user." },
+  "rock-head":    { group: "Damage", name: "Rock Head",    desc: "Recoil moves cost it nothing." },
+  "analytic":     { group: "Damage", name: "Analytic",     desc: "1.3× power when it moves second." },
+  "sniper":       { group: "Damage", name: "Sniper",       desc: "Critical hits do 2.25× instead of 1.5×." },
+  "super-luck":   { group: "Damage", name: "Super Luck",   desc: "Critical hits come one stage more often." },
+  "serene-grace": { group: "Damage", name: "Serene Grace", desc: "Doubles the odds of a move's extra effect." },
+  "skill-link":   { group: "Damage", name: "Skill Link",   desc: "Multi-hit moves always hit the full five times." },
+  "hustle":       { group: "Damage", name: "Hustle",       desc: "1.5× Attack, but physical moves are 20% less accurate." },
+  "compound-eyes":{ group: "Damage", name: "Compound Eyes",desc: "1.3× accuracy." },
+  "victory-star": { group: "Damage", name: "Victory Star", desc: "1.1× accuracy." },
+  "no-guard":     { group: "Damage", name: "No Guard",     desc: "Every move hits, in both directions." },
+  "scrappy":      { group: "Damage", name: "Scrappy",      desc: "Normal and Fighting moves hit Ghost types." },
+  "infiltrator":  { group: "Damage", name: "Infiltrator",  desc: "Ignores screens and Substitutes." },
+  "mold-breaker": { group: "Damage", name: "Mold Breaker", desc: "Ignores abilities that would get in its move's way." },
+  "turboblaze":   { group: "Damage", name: "Turboblaze",   desc: "Ignores abilities that would get in its move's way." },
+  "teravolt":     { group: "Damage", name: "Teravolt",     desc: "Ignores abilities that would get in its move's way." },
+  "unaware":      { group: "Damage", name: "Unaware",      desc: "Ignores the other side's stat changes." },
+  "defeatist":    { group: "Damage", name: "Defeatist",    desc: "Halves both attacking stats below half HP." },
+
+  /* --- damage taken --- */
+  "thick-fat":     { group: "Defence", name: "Thick Fat",     desc: "Halves Fire and Ice damage taken." },
+  "heatproof":     { group: "Defence", name: "Heatproof",     desc: "Halves Fire damage and burn damage." },
+  "water-bubble":  { group: "Defence", name: "Water Bubble",  desc: "Doubles its Water power, halves Fire taken, and it can't be burned." },
+  "fluffy":        { group: "Defence", name: "Fluffy",        desc: "Halves contact damage, but Fire hurts twice as much." },
+  "fur-coat":      { group: "Defence", name: "Fur Coat",      desc: "Halves physical damage taken." },
+  "ice-scales":    { group: "Defence", name: "Ice Scales",    desc: "Halves special damage taken." },
+  "solid-rock":    { group: "Defence", name: "Solid Rock",    desc: "Super effective hits do 3/4 damage." },
+  "filter":        { group: "Defence", name: "Filter",        desc: "Super effective hits do 3/4 damage." },
+  "prism-armor":   { group: "Defence", name: "Prism Armor",   desc: "Super effective hits do 3/4 damage." },
+  "multiscale":    { group: "Defence", name: "Multiscale",    desc: "Halves damage taken at full HP." },
+  "shadow-shield": { group: "Defence", name: "Shadow Shield", desc: "Halves damage taken at full HP." },
+  "marvel-scale":  { group: "Defence", name: "Marvel Scale",  desc: "1.5× Defence when statused." },
+  "sturdy":        { group: "Defence", name: "Sturdy",        desc: "Survive a KO from full HP with 1 HP." },
+  "magic-guard":   { group: "Defence", name: "Magic Guard",   desc: "Only direct attacks deal damage." },
+  "shell-armor":   { group: "Defence", name: "Shell Armor",   desc: "Cannot be hit critically." },
+  "battle-armor":  { group: "Defence", name: "Battle Armor",  desc: "Cannot be hit critically." },
+  "shield-dust":   { group: "Defence", name: "Shield Dust",   desc: "Moves that hit it never land their extra effect." },
+  "regenerator":   { group: "Defence", name: "Regenerator",   desc: "Heals 1/3 max HP on switching out." },
+  "wonder-guard":  { group: "Defence", name: "Wonder Guard",  desc: "Only super effective moves can touch it." },
+
+  /* --- immunities --- */
+  "levitate":         { group: "Immunity", name: "Levitate",         desc: "Immune to Ground moves." },
+  "water-absorb":     { group: "Immunity", name: "Water Absorb",     desc: "Heals 1/4 from Water moves instead of damage." },
+  "volt-absorb":      { group: "Immunity", name: "Volt Absorb",      desc: "Heals 1/4 from Electric moves instead of damage." },
+  "earth-eater":      { group: "Immunity", name: "Earth Eater",      desc: "Heals 1/4 from Ground moves instead of damage." },
+  "flash-fire":       { group: "Immunity", name: "Flash Fire",       desc: "Immune to Fire moves." },
+  "lightning-rod":    { group: "Immunity", name: "Lightning Rod",    desc: "Immune to Electric moves, and they give it +1 Sp. Atk." },
+  "storm-drain":      { group: "Immunity", name: "Storm Drain",      desc: "Immune to Water moves, and they give it +1 Sp. Atk." },
+  "motor-drive":      { group: "Immunity", name: "Motor Drive",      desc: "Immune to Electric moves, and they give it +1 Speed." },
+  "sap-sipper":       { group: "Immunity", name: "Sap Sipper",       desc: "Immune to Grass moves, and they give it +1 Attack." },
+  "well-baked-body":  { group: "Immunity", name: "Well-Baked Body",  desc: "Immune to Fire moves, and they give it +2 Defence." },
+  "soundproof":       { group: "Immunity", name: "Soundproof",       desc: "Immune to sound moves." },
+  "bulletproof":      { group: "Immunity", name: "Bulletproof",      desc: "Immune to ball and bomb moves." },
+  "overcoat":         { group: "Immunity", name: "Overcoat",         desc: "Immune to powder moves and to the sandstorm." },
+
+  /* --- status --- */
+  "immunity":     { group: "Status", name: "Immunity",     desc: "Cannot be poisoned." },
+  "pastel-veil":  { group: "Status", name: "Pastel Veil",  desc: "Cannot be poisoned." },
+  "limber":       { group: "Status", name: "Limber",       desc: "Cannot be paralysed." },
+  "insomnia":     { group: "Status", name: "Insomnia",     desc: "Cannot be put to sleep." },
+  "vital-spirit": { group: "Status", name: "Vital Spirit", desc: "Cannot be put to sleep." },
+  "sweet-veil":   { group: "Status", name: "Sweet Veil",   desc: "Cannot be put to sleep." },
+  "water-veil":   { group: "Status", name: "Water Veil",   desc: "Cannot be burned." },
+  "magma-armor":  { group: "Status", name: "Magma Armor",  desc: "Cannot be frozen." },
+  "own-tempo":    { group: "Status", name: "Own Tempo",    desc: "Cannot be confused." },
+  "oblivious":    { group: "Status", name: "Oblivious",    desc: "Cannot be confused or taunted." },
+  "inner-focus":  { group: "Status", name: "Inner Focus",  desc: "Cannot be made to flinch." },
+  "natural-cure": { group: "Status", name: "Natural Cure", desc: "Shakes off any status on switching out." },
+  "shed-skin":    { group: "Status", name: "Shed Skin",    desc: "1 in 3 chance of shaking off a status each turn." },
+  "early-bird":   { group: "Status", name: "Early Bird",   desc: "Wakes from sleep twice as fast." },
+  "poison-heal":  { group: "Status", name: "Poison Heal",  desc: "Poison heals it 1/8 a turn instead of hurting." },
+  "quick-feet":   { group: "Status", name: "Quick Feet",   desc: "1.5× Speed when statused, and paralysis doesn't slow it." },
+  "unburden":     { group: "Status", name: "Unburden",     desc: "Doubles Speed once it has used up its held item." },
+  "speed-boost":  { group: "Status", name: "Speed Boost",  desc: "+1 Speed every turn." },
+
+  /* --- contact --- */
+  "static":        { group: "Contact", name: "Static",        desc: "30% chance to paralyse anything that touches it." },
+  "flame-body":    { group: "Contact", name: "Flame Body",    desc: "30% chance to burn anything that touches it." },
+  "poison-point":  { group: "Contact", name: "Poison Point",  desc: "30% chance to poison anything that touches it." },
+  "effect-spore":  { group: "Contact", name: "Effect Spore",  desc: "30% chance to poison, paralyse or sleep anything that touches it." },
+  "cursed-body":   { group: "Contact", name: "Cursed Body",   desc: "30% chance to Disable the move that hit it." },
+  "rough-skin":    { group: "Contact", name: "Rough Skin",    desc: "Anything that touches it loses 1/8 max HP." },
+  "iron-barbs":    { group: "Contact", name: "Iron Barbs",    desc: "Anything that touches it loses 1/8 max HP." },
+  "aftermath":     { group: "Contact", name: "Aftermath",     desc: "Whatever knocks it out by contact loses 1/4 max HP." },
+  "gooey":         { group: "Contact", name: "Gooey",         desc: "Anything that touches it loses 1 stage of Speed." },
+  "tangling-hair": { group: "Contact", name: "Tangling Hair", desc: "Anything that touches it loses 1 stage of Speed." },
+  "poison-touch":  { group: "Contact", name: "Poison Touch",  desc: "30% chance to poison whatever it touches." },
+  "stench":        { group: "Contact", name: "Stench",        desc: "10% chance to make the target flinch." },
+
+  /* --- reacting --- */
+  "moxie":          { group: "Reacting", name: "Moxie",          desc: "+1 Attack for every Pokémon it knocks out." },
+  "chilling-neigh": { group: "Reacting", name: "Chilling Neigh", desc: "+1 Attack for every Pokémon it knocks out." },
+  "grim-neigh":     { group: "Reacting", name: "Grim Neigh",     desc: "+1 Sp. Atk for every Pokémon it knocks out." },
+  "beast-boost":    { group: "Reacting", name: "Beast Boost",    desc: "+1 to its best stat for every Pokémon it knocks out." },
+  "defiant":        { group: "Reacting", name: "Defiant",        desc: "+2 Attack whenever the foe lowers one of its stats." },
+  "competitive":    { group: "Reacting", name: "Competitive",    desc: "+2 Sp. Atk whenever the foe lowers one of its stats." },
+  "weak-armor":     { group: "Reacting", name: "Weak Armor",     desc: "A physical hit costs it 1 Defence and gives it 2 Speed." },
+  "steadfast":      { group: "Reacting", name: "Steadfast",      desc: "+1 Speed every time it flinches." },
+  "anger-point":    { group: "Reacting", name: "Anger Point",    desc: "A critical hit sends its Attack straight to +6." },
+  "justified":      { group: "Reacting", name: "Justified",      desc: "+1 Attack when a Dark move hits it." },
+  "rattled":        { group: "Reacting", name: "Rattled",        desc: "+1 Speed when a Bug, Ghost or Dark move hits it, or Intimidate does." },
+  "stamina":        { group: "Reacting", name: "Stamina",        desc: "+1 Defence every time it is hit." },
+  "berserk":        { group: "Reacting", name: "Berserk",        desc: "+1 Sp. Atk when a hit drops it below half." },
+  "water-compaction": { group: "Reacting", name: "Water Compaction", desc: "+2 Defence when a Water move hits it." },
+
+  /* --- stat changes --- */
+  "clear-body":      { group: "Stats", name: "Clear Body",      desc: "The foe cannot lower any of its stats." },
+  "white-smoke":     { group: "Stats", name: "White Smoke",     desc: "The foe cannot lower any of its stats." },
+  "full-metal-body": { group: "Stats", name: "Full Metal Body", desc: "The foe cannot lower any of its stats." },
+  "hyper-cutter":    { group: "Stats", name: "Hyper Cutter",    desc: "The foe cannot lower its Attack." },
+  "big-pecks":       { group: "Stats", name: "Big Pecks",       desc: "The foe cannot lower its Defence." },
+  "keen-eye":        { group: "Stats", name: "Keen Eye",        desc: "Its accuracy can't be lowered, and it sees past evasion." },
+  "illuminate":      { group: "Stats", name: "Illuminate",      desc: "Its accuracy can't be lowered, and it sees past evasion." },
+  "minds-eye":       { group: "Stats", name: "Mind's Eye",      desc: "Sees past evasion, and hits Ghost types with Normal and Fighting." },
+  "contrary":        { group: "Stats", name: "Contrary",        desc: "Stat changes work the other way round." },
+  "simple":          { group: "Stats", name: "Simple",          desc: "Stat changes count double." },
+
+  /* --- turn order --- */
+  "prankster":  { group: "Turn order", name: "Prankster", desc: "Status moves go first — but Dark types ignore them." },
+  "gale-wings": { group: "Turn order", name: "Gale Wings", desc: "Flying moves go first while it is at full HP." },
+  "triage":     { group: "Turn order", name: "Triage",    desc: "Healing moves go well before anything else." },
+  "stall":      { group: "Turn order", name: "Stall",     desc: "Always moves last." },
+  "pressure":   { group: "Turn order", name: "Pressure",  desc: "Moves aimed at it cost the attacker 2 PP instead of 1." },
+  "unnerve":    { group: "Turn order", name: "Unnerve",   desc: "The foe is too nervous to eat its berry." },
+
+  /* --- nothing in a one-on-one battle --- */
+  "run-away":          { group: "No effect one-on-one", noop: true, name: "Run Away",          desc: "Guarantees escape from wild Pokémon — nothing in a battle like this." },
+  "pickup":            { group: "No effect one-on-one", noop: true, name: "Pickup",            desc: "Finds items after a battle — nothing during one." },
+  "honey-gather":      { group: "No effect one-on-one", noop: true, name: "Honey Gather",      desc: "Finds honey after a battle — nothing during one." },
+  "ball-fetch":        { group: "No effect one-on-one", noop: true, name: "Ball Fetch",        desc: "Retrieves a thrown Poké Ball — nothing in a battle like this." },
+  "telepathy":         { group: "No effect one-on-one", noop: true, name: "Telepathy",         desc: "Dodges an ally's attack — needs a partner." },
+  "friend-guard":      { group: "No effect one-on-one", noop: true, name: "Friend Guard",      desc: "Protects an ally — needs a partner." },
+  "healer":            { group: "No effect one-on-one", noop: true, name: "Healer",            desc: "Cures an ally's status — needs a partner." },
+  "plus":              { group: "No effect one-on-one", noop: true, name: "Plus",              desc: "Boosts with a Minus partner — needs a partner." },
+  "minus":             { group: "No effect one-on-one", noop: true, name: "Minus",             desc: "Boosts with a Plus partner — needs a partner." },
+  "battery":           { group: "No effect one-on-one", noop: true, name: "Battery",           desc: "Powers up an ally — needs a partner." },
+  "power-spot":        { group: "No effect one-on-one", noop: true, name: "Power Spot",        desc: "Powers up an ally — needs a partner." },
+  "symbiosis":         { group: "No effect one-on-one", noop: true, name: "Symbiosis",         desc: "Passes its item to an ally — needs a partner." },
+  "receiver":          { group: "No effect one-on-one", noop: true, name: "Receiver",          desc: "Takes a fainted ally's ability — needs a partner." },
+  "power-of-alchemy":  { group: "No effect one-on-one", noop: true, name: "Power of Alchemy",  desc: "Takes a fainted ally's ability — needs a partner." },
+  "curious-medicine":  { group: "No effect one-on-one", noop: true, name: "Curious Medicine",  desc: "Resets an ally's stat changes — needs a partner." },
+  "hospitality":       { group: "No effect one-on-one", noop: true, name: "Hospitality",       desc: "Heals an ally on entry — needs a partner." },
 };
 
 const PINCH_ABILITY_TYPE = {
   blaze: "fire", torrent: "water", overgrow: "grass", swarm: "bug",
 };
+
+/** Abilities that all do exactly the same thing, so the engine reads a set. */
+const MOLD_BREAKERS = new Set(["mold-breaker", "turboblaze", "teravolt"]);
+const CRIT_PROOF = new Set(["shell-armor", "battle-armor"]);
+const STAT_LOCKED = new Set(["clear-body", "white-smoke", "full-metal-body"]);
+const KO_BOOST_STAT = { "moxie": "atk", "chilling-neigh": "atk", "grim-neigh": "spa" };
+const SLEEP_PROOF = new Set(["insomnia", "vital-spirit", "sweet-veil"]);
+const QUARTER_DAMAGE_ON_SE = new Set(["solid-rock", "filter", "prism-armor"]);
+const HALVE_AT_FULL_HP = new Set(["multiscale", "shadow-shield"]);
+const SPEED_STAT_LOWER_ON_CONTACT = new Set(["gooey", "tangling-hair"]);
+const CHIP_ON_CONTACT = new Set(["rough-skin", "iron-barbs"]);
+const WEATHER_SPEED_ABILITY = {
+  "swift-swim": "rain", "chlorophyll": "sun", "sand-rush": "sand", "slush-rush": "snow",
+};
+const EVASION_WEATHER_ABILITY = { "sand-veil": "sand", "snow-cloak": "snow" };
+/** Contact abilities that hand out a status, and which one. */
+const CONTACT_STATUS_ABILITY = {
+  "static": "paralysis", "flame-body": "burn", "poison-point": "poison",
+};
+/** Status the ability simply refuses. */
+const STATUS_PROOF_ABILITY = {
+  burn: new Set(["water-veil", "water-bubble"]),
+  paralysis: new Set(["limber"]),
+  freeze: new Set(["magma-armor"]),
+  poison: new Set(["immunity", "pastel-veil"]),
+  toxic: new Set(["immunity", "pastel-veil"]),
+};
+/** Sees past evasion and can't have its accuracy lowered. */
+const CLEAR_SIGHTED = new Set(["keen-eye", "illuminate", "minds-eye"]);
+/** Normal and Fighting moves hit Ghost types. */
+const GHOST_HITTERS = new Set(["scrappy", "minds-eye"]);
 
 const WEATHER_MOVES = {
   "rain-dance": "rain", "sunny-day": "sun",
@@ -351,11 +671,76 @@ const WEATHER_ABILITY = {
 
 const HAZARD_MOVES = ["stealth-rock", "spikes", "toxic-spikes", "sticky-web"];
 
+/** Swallows a move of this type and heals a quarter instead. */
 const ABSORB_ABILITY_TYPE = {
   "water-absorb": "water", "volt-absorb": "electric",
+  "earth-eater": "ground", "dry-skin": "water",
+};
+
+/** Swallows a move of this type and takes a stat boost instead. */
+const REDIRECT_ABILITY = {
+  "lightning-rod":   { type: "electric", stat: "spa", change: 1 },
+  "storm-drain":     { type: "water",    stat: "spa", change: 1 },
+  "motor-drive":     { type: "electric", stat: "spe", change: 1 },
+  "sap-sipper":      { type: "grass",    stat: "atk", change: 1 },
+  "well-baked-body": { type: "fire",     stat: "def", change: 2 },
+};
+
+/** Abilities that read a move flag and multiply its power. */
+const FLAG_POWER_ABILITY = {
+  "iron-fist":     { flag: "punch",   mult: 1.2 },
+  "strong-jaw":    { flag: "bite",    mult: 1.5 },
+  "tough-claws":   { flag: "contact", mult: 1.3 },
+  "sharpness":     { flag: "slicing", mult: 1.5 },
+  "mega-launcher": { flag: "pulse",   mult: 1.5 },
+  "punk-rock":     { flag: "sound",   mult: 1.3 },
+};
+
+/** Abilities that turn a whole flag of moves away at the door. */
+const FLAG_IMMUNE_ABILITY = { "soundproof": "sound", "bulletproof": "bullet", "overcoat": "powder" };
+
+/** Weather-setting items: whoever set it holds one, the weather lasts 8 not 5. */
+const WEATHER_ROCK = {
+  "damp-rock": "rain", "heat-rock": "sun", "smooth-rock": "sand", "icy-rock": "snow",
+};
+
+/** The punish each protection move hands out to whatever touched it. */
+const PROTECT_PUNISH = {
+  "spiky-shield":    { chip: 8 },
+  "kings-shield":    { stat: "atk", change: -1 },
+  "obstruct":        { stat: "def", change: -2 },
+  "silk-trap":       { stat: "spe", change: -1 },
+  "baneful-bunker":  { status: "poison" },
+  "burning-bulwark": { status: "burn" },
 };
 
 const isChoiceItem = (item) => item === "choice-band" || item === "choice-specs" || item === "choice-scarf";
+
+/** Does this move carry the given baked flag? */
+const hasFlag = (move, flag) => move.flags?.includes(flag) ?? false;
+
+/**
+ * The defender's ability as this attacker sees it. Mold Breaker and its two
+ * cousins switch off anything that would get in the move's way — Levitate,
+ * Sturdy, Thick Fat, Volt Absorb and the rest. They do NOT switch off the
+ * abilities that punish a move after it lands, which is why Static and Rough
+ * Skin read `foe.ability` directly instead of going through here.
+ */
+const seenAbility = (attacker, defender) =>
+  MOLD_BREAKERS.has(attacker?.ability) ? null : defender.ability;
+
+/**
+ * The weather as the field actually experiences it. Air Lock and Cloud Nine
+ * don't clear the weather — they just stop anything reading it, and the
+ * moment their holder leaves, the sun is still there.
+ */
+function weatherOf(state) {
+  for (const side of [0, 1]) {
+    const b = active(state, side);
+    if (b.hp > 0 && (b.ability === "air-lock" || b.ability === "cloud-nine")) return null;
+  }
+  return state.weather.kind;
+}
 
 /* ------------------------------------------------- multi-turn move data --- */
 
@@ -451,10 +836,14 @@ const STATUS_TYPES_THAT_RESPECT_IMMUNITY = ["electric", "poison"];
 
 const SCREEN_MOVES = { "reflect": "reflect", "light-screen": "lightScreen", "aurora-veil": "auroraVeil" };
 
-/** Grounded = takes Spikes, Toxic Spikes, Sticky Web, and Ground moves land. */
-function isGrounded(b) {
+/**
+ * Grounded = takes Spikes, Toxic Spikes, Sticky Web, and Ground moves land.
+ * `ability` is passed in when an attacker is asking, so Mold Breaker can walk
+ * a Ground move straight through Levitate.
+ */
+function isGrounded(b, ability = b.ability) {
   if (defendingTypes(b).includes("flying")) return false;
-  if (b.ability === "levitate") return false;
+  if (ability === "levitate") return false;
   if (b.item === "air-balloon" && !b.balloonPopped) return false;
   return true;
 }
@@ -489,9 +878,11 @@ export function playTurn(prevState, actions, rng) {
 
   if (state.winner != null) return { state, events };
 
+  refreshUnnerve(state);
   for (const b of [active(state, 0), active(state, 1)]) {
     b.flinched = false;
     b.vol.protect = false;
+    b.vol.protectedWith = null;
     b.vol.roosted = false;
     b.vol.tookDamage = false;
     b.vol.turnsActive += 1;
@@ -506,12 +897,13 @@ export function playTurn(prevState, actions, rng) {
   // Moves: priority first, then Speed (inverted under Trick Room), ties by
   // coin flip.
   const moveOrder = orderSides(state, rng, actions);
-  for (const side of moveOrder) {
+  for (const [order, side] of moveOrder.entries()) {
     if (actions[side]?.type !== "move") continue;
     if (state.winner != null) break;
     const user = active(state, side);
     if (user.hp <= 0) continue; // fainted before it could move
-    executeMove(state, side, actions[side].moveIndex, events, rng);
+    // Analytic wants to know whether it went second, which is exactly this.
+    executeMove(state, side, actions[side].moveIndex, events, rng, { movesLast: order === 1 });
   }
 
   if (state.winner == null) endOfTurn(state, moveOrder, events, rng);
@@ -525,6 +917,8 @@ export function playTurn(prevState, actions, rng) {
  * Speed, and Trick Room turns that comparison upside down for its five turns.
  */
 function orderSides(state, rng, actions = null) {
+  const weather = weatherOf(state);
+
   const prio = (side) => {
     if (!actions || actions[side]?.type !== "move") return 0;
     const user = active(state, side);
@@ -533,12 +927,42 @@ function orderSides(state, rng, actions = null) {
     const forced = forcedMoveIndex(user);
     const idx = forced ?? actions[side].moveIndex;
     const slot = user.moves[idx];
-    return slot ? (slot.move.priority ?? 0) : 0;
+    if (!slot) return 0;
+    return slot.move.priority ?? 0;
   };
-  const p0 = prio(0), p1 = prio(1);
+  // The abilities that push a move up the queue.
+  const bonus = (side) => {
+    if (!actions || actions[side]?.type !== "move") return 0;
+    const user = active(state, side);
+    const forced = forcedMoveIndex(user);
+    const move = user.moves[forced ?? actions[side].moveIndex]?.move;
+    if (!move) return 0;
+    if (user.ability === "prankster" && move.category === "status") return 1;
+    if (user.ability === "gale-wings" && move.type === "flying" && user.hp === user.maxHP) return 1;
+    if (user.ability === "triage" && hasFlag(move, "heal")) return 3;
+    return 0;
+  };
+
+  const p0 = prio(0) + bonus(0), p1 = prio(1) + bonus(1);
   if (p0 !== p1) return p0 > p1 ? [0, 1] : [1, 0];
-  const s0 = effectiveSpeed(active(state, 0), state.teams[0]);
-  const s1 = effectiveSpeed(active(state, 1), state.teams[1]);
+
+  // Stall and Quick Claw only decide who MOVES first; the switch pass runs
+  // through here too and must not spend a Quick Claw roll on it.
+  if (actions) {
+    // Stall goes last however quick it is; two of them fall back to Speed.
+    const stall0 = active(state, 0).ability === "stall";
+    const stall1 = active(state, 1).ability === "stall";
+    if (stall0 !== stall1) return stall0 ? [1, 0] : [0, 1];
+
+    // A Quick Claw jumps the queue one time in five. Both sides get their
+    // roll, in side order, so a scripted RNG reads the same way every run.
+    const claw0 = active(state, 0).item === "quick-claw" && rng.chance(0.2);
+    const claw1 = active(state, 1).item === "quick-claw" && rng.chance(0.2);
+    if (claw0 !== claw1) return claw0 ? [0, 1] : [1, 0];
+  }
+
+  const s0 = effectiveSpeed(active(state, 0), state.teams[0], weather);
+  const s1 = effectiveSpeed(active(state, 1), state.teams[1], weather);
   if (s0 !== s1) {
     const fasterFirst = state.trickRoom > 0 ? s0 < s1 : s0 > s1;
     return fasterFirst ? [0, 1] : [1, 0];
@@ -580,6 +1004,11 @@ function doSwitch(state, side, to, events) {
   out.flinched = false;
   out.choiceLock = null;
   out.vol = freshVolatiles();
+  if (out.ability === "natural-cure" && out.hp > 0 && out.status) {
+    out.status = null;
+    out.sleepTurns = 0;
+    events.push({ type: "cured", side, name: out.pokemon.name, by: "Natural Cure" });
+  }
   if (out.ability === "regenerator" && out.hp > 0 && out.hp < out.maxHP) {
     const healed = Math.min(out.maxHP - out.hp, Math.floor(out.maxHP / 3));
     out.hp += healed;
@@ -618,13 +1047,28 @@ export function replaceFainted(prevState, side, to) {
 
 /* ------------------------------------------------------- entry effects --- */
 
-function setWeather(state, kind, events) {
+/**
+ * Put weather up. Whoever set it holds the rock, so the rock is read off the
+ * setter — five turns normally, eight with the matching one.
+ */
+function setWeather(state, kind, events, setter = null) {
   if (state.weather.kind === kind) {
     events.push({ type: "noEffect" });
     return;
   }
-  state.weather = { kind, turns: 5 };
-  events.push({ type: "weather", kind });
+  const extended = setter && WEATHER_ROCK[setter.item] === kind;
+  state.weather = { kind, turns: extended ? 8 : 5 };
+  events.push({ type: "weather", kind, turns: state.weather.turns });
+}
+
+/**
+ * Unnerve is the foe's ability but it lands on the holder's berry, so it is
+ * stamped onto whoever is standing opposite whenever the field changes.
+ */
+function refreshUnnerve(state) {
+  for (const side of [0, 1]) {
+    active(state, side).vol.unnerved = active(state, 1 - side).ability === "unnerve";
+  }
 }
 
 /**
@@ -635,6 +1079,15 @@ function applyEntryEffects(state, side, events) {
   const b = active(state, side);
   const hz = state.teams[side].hazards;
   const name = b.pokemon.name;
+  refreshUnnerve(state);
+
+  // Heavy-Duty Boots walk over the lot — rocks, spikes, web and all.
+  if (b.item === "heavy-duty-boots") {
+    if (hz.stealthRock || hz.spikes || hz.toxicSpikes || hz.stickyWeb) {
+      events.push({ type: "hazardIgnored", side, name, item: "Heavy-Duty Boots" });
+    }
+    return applyEntryAbilities(state, side, events);
+  }
 
   if (hz.stealthRock && takesIndirectDamage(b)) {
     // An eighth of max HP, scaled by how much Rock hurts this Pokémon.
@@ -663,15 +1116,34 @@ function applyEntryEffects(state, side, events) {
   }
 
   if (b.hp <= 0) return;
+  applyEntryAbilities(state, side, events);
+}
+
+/** The half of an entrance that comes from the ability rather than the field. */
+function applyEntryAbilities(state, side, events) {
+  const b = active(state, side);
+  const foe = active(state, 1 - side);
+  const name = b.pokemon.name;
 
   const weatherKind = WEATHER_ABILITY[b.ability];
-  if (weatherKind) setWeather(state, weatherKind, events);
-  if (b.ability === "intimidate") {
-    const foe = active(state, 1 - side);
-    if (foe.hp > 0) {
-      events.push({ type: "ability", side, name, ability: "Intimidate" });
-      applyStatChanges(foe, 1 - side, [{ stat: "atk", change: -1 }], events);
+  if (weatherKind) setWeather(state, weatherKind, events, b);
+
+  if (b.ability === "intimidate" && foe.hp > 0) {
+    events.push({ type: "ability", side, name, ability: "Intimidate" });
+    applyStatChanges(foe, 1 - side, [{ stat: "atk", change: -1 }], events, {
+      fromFoe: true, ability: seenAbility(b, foe),
+    });
+    // Rattled is jumpy about being Intimidated, not just about being hit.
+    if (foe.ability === "rattled") {
+      applyStatChanges(foe, 1 - side, [{ stat: "spe", change: 1 }], events);
     }
+  }
+
+  // Download sizes the foe up and picks whichever attack it defends worse.
+  if (b.ability === "download" && foe.hp > 0) {
+    const stat = battleStat(foe, "def", {}) <= battleStat(foe, "spd", {}) ? "atk" : "spa";
+    events.push({ type: "ability", side, name, ability: "Download" });
+    applyStatChanges(b, side, [{ stat, change: 1 }], events);
   }
 }
 
@@ -686,10 +1158,11 @@ function applyEntryEffects(state, side, events) {
  * only spent once every one of those is cleared — and only on the FIRST turn
  * of a multi-turn move, because that is when the move was chosen.
  */
-function executeMove(state, side, moveIndex, events, rng) {
+function executeMove(state, side, moveIndex, events, rng, { movesLast = false } = {}) {
   const user = active(state, side);
   const foe = active(state, 1 - side);
   const name = user.pokemon.name;
+  const weather = weatherOf(state);
 
   // Recharging costs the whole turn.
   if (user.vol.recharge) {
@@ -700,11 +1173,15 @@ function executeMove(state, side, moveIndex, events, rng) {
 
   if (user.flinched) {
     events.push({ type: "flinch", side, name });
+    if (user.ability === "steadfast") {
+      applyStatChanges(user, side, [{ stat: "spe", change: 1 }], events);
+    }
     breakLocks(user, side, events);
     return;
   }
   if (user.status === "sleep") {
-    user.sleepTurns -= 1;
+    // Early Bird burns through two turns of sleep for every one that passes.
+    user.sleepTurns -= user.ability === "early-bird" ? 2 : 1;
     if (user.sleepTurns > 0) {
       events.push({ type: "asleep", side, name });
       return;
@@ -779,7 +1256,9 @@ function executeMove(state, side, moveIndex, events, rng) {
   }
 
   if (slot && !continuing) {
-    slot.pp -= 1;
+    // Pressure charges double, but only for moves aimed across the field.
+    const cost = foe.ability === "pressure" && foe.hp > 0 && targetsFoe(move) ? 2 : 1;
+    slot.pp = Math.max(0, slot.pp - cost);
     if (isChoiceItem(user.item) && user.choiceLock == null) user.choiceLock = moveIndex;
   }
   user.vol.lastMoveIndex = slot ? moveIndex : null;
@@ -787,7 +1266,7 @@ function executeMove(state, side, moveIndex, events, rng) {
   // ---- Two-turn charge moves ----
   const chargeInfo = CHARGE_MOVES[move.slug];
   if (chargeInfo && !user.vol.charge) {
-    const weatherSkip = chargeInfo.skipIn && state.weather.kind === chargeInfo.skipIn;
+    const weatherSkip = chargeInfo.skipIn && weather === chargeInfo.skipIn;
     const herbSkip = !weatherSkip && user.item === "power-herb";
     if (!weatherSkip && !herbSkip) {
       user.vol.charge = { moveIndex, slug: move.slug, invuln: chargeInfo.invuln ?? null };
@@ -797,10 +1276,7 @@ function executeMove(state, side, moveIndex, events, rng) {
     }
     // Fired the same turn: the charge-turn boost still happens either way.
     if (chargeInfo.boost) applyStatChanges(user, side, chargeInfo.boost, events);
-    if (herbSkip) {
-      user.item = null;
-      events.push({ type: "itemUsed", side, name, item: "Power Herb" });
-    }
+    if (herbSkip) consumeItem(user, side, "Power Herb", events);
   }
   // Releasing: the user comes back out of hiding before it swings.
   user.vol.charge = null;
@@ -835,10 +1311,15 @@ function executeMove(state, side, moveIndex, events, rng) {
     return;
   }
 
+  // The foe's ability as this attacker sees it — Mold Breaker sees nothing.
+  const foeAbility = seenAbility(user, foe);
+
   // A status move only bounces off a type immunity when it is one of the two
   // that really do (Thunder Wave into a Ground type, Poison Powder into Steel).
   const foeTypes = defendingTypes(foe);
-  const eff = typeEffectiveness(move.type, foeTypes);
+  // Scrappy and Mind's Eye put Normal and Fighting through a Ghost type.
+  const ignoresGhost = GHOST_HITTERS.has(user.ability) && (move.type === "normal" || move.type === "fighting");
+  const eff = typeEffectiveness(move.type, ignoresGhost ? foeTypes.filter((t) => t !== "ghost") : foeTypes);
   if (
     move.category === "status" && targetsFoe(move) && eff === 0 &&
     STATUS_TYPES_THAT_RESPECT_IMMUNITY.includes(move.type)
@@ -847,10 +1328,44 @@ function executeMove(state, side, moveIndex, events, rng) {
     return;
   }
 
+  // Whole categories of move a Pokémon simply doesn't have to deal with.
+  if (targetsFoe(move) && foe.hp > 0) {
+    const flagImmunity =
+      FLAG_IMMUNE_ABILITY[foeAbility] && hasFlag(move, FLAG_IMMUNE_ABILITY[foeAbility])
+        ? ABILITIES[foeAbility].name
+        : hasFlag(move, "powder") && foe.item === "safety-goggles" ? "Safety Goggles"
+        : hasFlag(move, "powder") && foeTypes.includes("grass") ? "being a Grass type"
+        : null;
+    if (flagImmunity) {
+      events.push({ type: "moveBlocked", side: 1 - side, name: foe.pokemon.name, move: move.name, by: flagImmunity });
+      breakLocks(user, side, events);
+      return;
+    }
+    // A Dark type is far too cynical to be hit by a Prankster status move.
+    if (user.ability === "prankster" && move.category === "status" && foeTypes.includes("dark")) {
+      events.push({ type: "moveBlocked", side: 1 - side, name: foe.pokemon.name, move: move.name, by: "being a Dark type" });
+      return;
+    }
+  }
+
   // ---- Protect, and the hiding places it can't reach into ----
   const breaksProtect = CHARGE_MOVES[move.slug]?.breaksProtect || move.slug === "feint";
   if (foe.vol.protect && targetsFoe(move) && !breaksProtect) {
     events.push({ type: "protected", side: 1 - side, name: foe.pokemon.name, move: move.name });
+    // Now that moves carry a contact flag, the shields with teeth can use them.
+    const punish = PROTECT_PUNISH[foe.vol.protectedWith];
+    if (punish && hasFlag(move, "contact")) {
+      if (punish.chip && takesIndirectDamage(user)) {
+        chip(user, side, Math.max(1, Math.floor(user.maxHP / punish.chip)), foe.vol.protectedWith === "spiky-shield" ? "Spiky Shield" : "the shield", events);
+      }
+      if (punish.stat) {
+        applyStatChanges(user, side, [{ stat: punish.stat, change: punish.change }], events, {
+          fromFoe: true, ability: seenAbility(foe, user),
+        });
+      }
+      if (punish.status) inflictStatus(user, side, punish.status, events, rng, { weather });
+      checkFaint(state, events);
+    }
     breakLocks(user, side, events);
     return;
   }
@@ -861,10 +1376,20 @@ function executeMove(state, side, moveIndex, events, rng) {
     return;
   }
 
-  // Accuracy. null accuracy never misses.
-  if (move.accuracy != null) {
-    const stageDiff = Math.max(-6, Math.min(6, user.stages.acc - foe.stages.eva));
-    const hitChance = (move.accuracy / 100) * stageMult(stageDiff, 3);
+  // Accuracy. null accuracy never misses, and neither does anything at all if
+  // either side has No Guard.
+  const noGuard = user.ability === "no-guard" || foeAbility === "no-guard";
+  if (move.accuracy != null && !noGuard) {
+    // Keen Eye and friends look straight past a raised evasion; nothing looks
+    // past a lowered one, so only the positive half is ignored.
+    const foeEva = CLEAR_SIGHTED.has(user.ability) ? Math.min(0, foe.stages.eva) : foe.stages.eva;
+    const stageDiff = Math.max(-6, Math.min(6, user.stages.acc - foeEva));
+    let hitChance = (move.accuracy / 100) * stageMult(stageDiff, 3);
+    if (user.ability === "compound-eyes") hitChance *= 1.3;
+    if (user.ability === "victory-star") hitChance *= 1.1;
+    if (user.ability === "hustle" && move.category === "physical") hitChance *= 0.8;
+    if (foe.item === "bright-powder") hitChance *= 0.9;
+    if (EVASION_WEATHER_ABILITY[foeAbility] === weather) hitChance *= 0.8; // 1.25× evasion
     if (!rng.chance(Math.min(1, hitChance))) {
       events.push({ type: "miss", side, name, move: move.name });
       breakLocks(user, side, events);
@@ -873,6 +1398,8 @@ function executeMove(state, side, moveIndex, events, rng) {
   }
 
   if (move.category === "status") {
+    // A status move breaks a Metronome streak just as surely as a miss does.
+    user.vol.repeat = { slug: move.slug, uses: 1 };
     applyStatusMove(state, side, move, events, rng);
     startLocks(state, side, move, events, rng);
     return;
@@ -889,70 +1416,137 @@ function executeMove(state, side, moveIndex, events, rng) {
     return;
   }
 
+  // Wonder Guard turns away everything that isn't super effective.
+  if (foeAbility === "wonder-guard" && eff <= 1) {
+    events.push({ type: "moveBlocked", side: 1 - side, name: foe.pokemon.name, move: move.name, by: "Wonder Guard" });
+    breakLocks(user, side, events);
+    return;
+  }
+
   // Abilities and items that swallow the move whole.
-  if (ABSORB_ABILITY_TYPE[foe.ability] === move.type) {
+  if (ABSORB_ABILITY_TYPE[foeAbility] === move.type) {
+    // Dry Skin drinks a quarter like the rest; the others do too.
     const healed = Math.min(foe.maxHP - foe.hp, Math.floor(foe.maxHP / 4));
     if (healed > 0) foe.hp += healed;
     events.push({
       type: "absorb", side: 1 - side, name: foe.pokemon.name,
-      ability: ABILITIES[foe.ability].name, amount: healed,
+      ability: ABILITIES[foeAbility].name, amount: healed,
     });
     breakLocks(user, side, events);
     return;
   }
-  if (move.type === "fire" && foe.ability === "flash-fire") {
+  if (REDIRECT_ABILITY[foeAbility]?.type === move.type) {
+    const { stat, change } = REDIRECT_ABILITY[foeAbility];
+    events.push({ type: "absorb", side: 1 - side, name: foe.pokemon.name, ability: ABILITIES[foeAbility].name, amount: 0 });
+    applyStatChanges(foe, 1 - side, [{ stat, change }], events);
+    breakLocks(user, side, events);
+    return;
+  }
+  if (move.type === "fire" && foeAbility === "flash-fire") {
     events.push({ type: "absorb", side: 1 - side, name: foe.pokemon.name, ability: "Flash Fire", amount: 0 });
     breakLocks(user, side, events);
     return;
   }
-  if (move.type === "ground" && !isGrounded(foe)) {
+  if (move.type === "ground" && !isGrounded(foe, foeAbility)) {
     events.push({ type: "immune", side: 1 - side, name: foe.pokemon.name });
     breakLocks(user, side, events);
     return;
   }
 
   // Multi-hit moves: 2-5 with the real 35/35/15/15 split, or a fixed count.
+  // Skill Link skips the roll entirely and takes the top of the range.
   let hits = 1;
   if (move.meta?.minHits != null && move.meta?.maxHits != null) {
     if (move.meta.minHits === move.meta.maxHits) {
       hits = move.meta.minHits;
+    } else if (user.ability === "skill-link") {
+      hits = move.meta.maxHits;
     } else {
       const r = rng.int(20);
       hits = r < 7 ? 2 : r < 14 ? 3 : r < 17 ? 4 : 5;
     }
   }
 
-  const weather = state.weather.kind;
-  const basePower = movePower(state, side, move, { foeHiding });
+  // Sheer Force trades the move's extra effect for raw power. The flag is read
+  // once here and again after the hit, where it silences the secondary.
+  const sheerForced = user.ability === "sheer-force" && hasSecondaryEffect(move);
+  const contact = hasFlag(move, "contact");
+  const basePower = movePower(state, side, move, { foeHiding, weather });
   let totalDamage = 0;
   let brokeSub = false;
-  for (let h = 0; h < hits && foe.hp > 0; h++) {
-    const critStages = move.meta?.critRate ?? 0;
+  // A Rough Skin or Rocky Helmet can knock the attacker out mid-flurry, and a
+  // fainted Pokémon doesn't get to finish its multi-hit move.
+  for (let h = 0; h < hits && foe.hp > 0 && user.hp > 0; h++) {
+    let critStages = move.meta?.critRate ?? 0;
+    if (user.ability === "super-luck") critStages += 1;
+    if (user.item === "scope-lens" || user.item === "razor-claw") critStages += 1;
     const critChance = [1 / 24, 1 / 8, 1 / 2, 1][Math.min(3, critStages)];
-    const crit = rng.chance(critChance);
+    const crit = rng.chance(critChance) && !CRIT_PROOF.has(foeAbility);
 
-    const atk = attackStat(user, atkKey, { crit, isPhysical });
-    const def = defenseStat(foe, defKey, { crit, weather });
+    // Unaware refuses to look at the other side's stat changes — each way round.
+    const atk = attackStat(user, atkKey, {
+      crit, isPhysical, weather, ignoreStages: foeAbility === "unaware",
+    });
+    const def = defenseStat(foe, defKey, {
+      crit, weather, ability: foeAbility, ignoreStages: user.ability === "unaware",
+    });
 
-    // Power modifiers: Technician, then the low-HP pinch abilities.
+    // Power modifiers: Technician, then the low-HP pinch abilities, then the
+    // flag-reading abilities, then Sheer Force and Sand Force.
     let power = basePower;
     if (user.ability === "technician" && power <= 60) power = Math.floor(power * 1.5);
     if (PINCH_ABILITY_TYPE[user.ability] === move.type && user.hp * 3 <= user.maxHP) {
       power = Math.floor(power * 1.5);
+    }
+    const flagBoost = FLAG_POWER_ABILITY[user.ability];
+    if (flagBoost && hasFlag(move, flagBoost.flag)) power = Math.floor(power * flagBoost.mult);
+    if (user.ability === "reckless" && move.meta?.drain < 0) power = Math.floor(power * 1.2);
+    if (sheerForced) power = Math.floor(power * 1.3);
+    if (user.ability === "sand-force" && weather === "sand" &&
+        ["rock", "ground", "steel"].includes(move.type)) {
+      power = Math.floor(power * 1.3);
     }
 
     const stabBase = user.ability === "adaptability" ? 2 : 1.5;
     const stab = user.pokemon.types.includes(move.type) ? stabBase : 1;
 
     // The `other` multiplier battle.js has always had ready: weather, screens,
-    // Life Orb, Expert Belt, Thick Fat — multiplied together, floored once.
+    // items and the defensive abilities — multiplied together, floored once.
     let other = 1;
     if (weather === "rain") other *= move.type === "water" ? 1.5 : move.type === "fire" ? 0.5 : 1;
     if (weather === "sun") other *= move.type === "fire" ? 1.5 : move.type === "water" ? 0.5 : 1;
-    other *= screenMultiplier(state, 1 - side, isPhysical, crit);
+    if (!(user.ability === "infiltrator")) other *= screenMultiplier(state, 1 - side, isPhysical, crit);
     if (user.item === "life-orb") other *= 1.3;
     if (user.item === "expert-belt" && eff > 1) other *= 1.2;
-    if (foe.ability === "thick-fat" && (move.type === "fire" || move.type === "ice")) other *= 0.5;
+    if (TYPE_BOOST_ITEM[user.item] === move.type) other *= 1.2;
+    if (user.item === "muscle-band" && isPhysical) other *= 1.1;
+    if (user.item === "wise-glasses" && !isPhysical) other *= 1.1;
+    if (user.item === "metronome" && user.vol.repeat?.slug === move.slug) {
+      other *= Math.min(2, 1 + 0.2 * user.vol.repeat.uses);
+    }
+    if (user.ability === "water-bubble" && move.type === "water") other *= 2;
+    if (user.ability === "analytic" && movesLast) other *= 1.3;
+    if (user.ability === "sniper" && crit) other *= 1.5;
+    if (user.ability === "tinted-lens" && eff < 1) other *= 2;
+
+    if (foeAbility === "thick-fat" && (move.type === "fire" || move.type === "ice")) other *= 0.5;
+    if (foeAbility === "heatproof" && move.type === "fire") other *= 0.5;
+    if (foeAbility === "water-bubble" && move.type === "fire") other *= 0.5;
+    if (foeAbility === "fluffy") {
+      if (contact) other *= 0.5;
+      if (move.type === "fire") other *= 2;
+    }
+    if (foeAbility === "ice-scales" && !isPhysical) other *= 0.5;
+    if (foeAbility === "punk-rock" && hasFlag(move, "sound")) other *= 0.5;
+    if (QUARTER_DAMAGE_ON_SE.has(foeAbility) && eff > 1) other *= 0.75;
+    if (HALVE_AT_FULL_HP.has(foeAbility) && foe.hp === foe.maxHP) other *= 0.5;
+
+    // A type-resist berry is eaten on the way in, so it only ever helps once.
+    const berryType = RESIST_BERRY[foe.item];
+    if (berryType === move.type && (eff > 1 || move.type === "normal") && canEatBerry(foe)) {
+      other *= 0.5;
+      consumeItem(foe, 1 - side, ITEMS[foe.item].name, events);
+    }
 
     const calc = calcDamage({
       level: user.level, power, atk, def,
@@ -964,8 +1558,9 @@ function executeMove(state, side, moveIndex, events, rng) {
     const raw = calc.rolls[rollIndex];
     const detail = { atk, def, atkKey, defKey, power, other, rollIndex, rolls: calc.rolls };
 
-    // A Substitute eats the hit and everything that rides on it.
-    if (foe.vol.sub > 0) {
+    // A Substitute eats the hit and everything that rides on it — unless the
+    // attacker has Infiltrator, which walks straight through the doll.
+    if (foe.vol.sub > 0 && user.ability !== "infiltrator") {
       const dmg = Math.min(foe.vol.sub, raw);
       foe.vol.sub -= dmg;
       totalDamage += dmg;
@@ -987,7 +1582,7 @@ function executeMove(state, side, moveIndex, events, rng) {
 
     // Sturdy and Focus Sash: a KO from full HP leaves 1 instead.
     if (dmg >= foe.hp && foe.hp === foe.maxHP && foe.hp > 1) {
-      if (foe.ability === "sturdy") {
+      if (foeAbility === "sturdy") {
         dmg = foe.hp - 1;
         events.push({ type: "endure", side: 1 - side, name: foe.pokemon.name, via: "Sturdy" });
       } else if (foe.item === "focus-sash") {
@@ -996,6 +1591,7 @@ function executeMove(state, side, moveIndex, events, rng) {
         events.push({ type: "endure", side: 1 - side, name: foe.pokemon.name, via: "Focus Sash" });
       }
     }
+    const wasAboveHalf = foe.hp * 2 > foe.maxHP;
 
     foe.hp -= dmg;
     foe.vol.tookDamage = true;
@@ -1014,9 +1610,22 @@ function executeMove(state, side, moveIndex, events, rng) {
       foe.balloonPopped = true;
       events.push({ type: "balloonPop", side: 1 - side, name: foe.pokemon.name });
     }
+
+    // What the target does about having been hit. All of it needs a target
+    // that is still standing, and none of it cares whether the move had a
+    // secondary effect of its own.
+    if (foe.hp > 0 && dmg > 0) {
+      reactToHit(state, side, move, { crit, isPhysical, eff, wasAboveHalf, contact, weather }, events, rng);
+    }
   }
 
   const hitTheTarget = totalDamage > 0 && !brokeSub && foe.vol.sub === 0;
+
+  // Metronome counts consecutive uses of the same move, win or lose. `uses` is
+  // the count BEFORE this one, so the first swing is always plain 1×.
+  user.vol.repeat = user.vol.repeat?.slug === move.slug
+    ? { slug: move.slug, uses: user.vol.repeat.uses + 1 }
+    : { slug: move.slug, uses: 1 };
 
   // Drain / recoil are a percentage of damage dealt; Struggle is special-cased
   // to modern rules (quarter of the user's max HP). Magic Guard blocks recoil
@@ -1024,17 +1633,25 @@ function executeMove(state, side, moveIndex, events, rng) {
   if (move === STRUGGLE) {
     applyRecoil(user, side, Math.floor(user.maxHP / 4), events);
   } else if (move.meta?.drain) {
-    const frac = Math.floor((totalDamage * Math.abs(move.meta.drain)) / 100);
+    let frac = Math.floor((totalDamage * Math.abs(move.meta.drain)) / 100);
     if (move.meta.drain > 0) {
+      if (user.item === "big-root") frac = Math.floor(frac * 1.3);
       const healed = Math.min(user.maxHP - user.hp, Math.max(1, frac));
       user.hp += healed;
       events.push({ type: "drain", side, name: user.pokemon.name, amount: healed });
-    } else if (takesIndirectDamage(user)) {
+    } else if (takesIndirectDamage(user) && user.ability !== "rock-head") {
       applyRecoil(user, side, Math.max(1, frac), events);
     }
   }
-  if (user.item === "life-orb" && totalDamage > 0 && takesIndirectDamage(user) && user.hp > 0) {
+  // Sheer Force's trade includes the Life Orb's price — that is the real rule,
+  // not a rounding error, and it is why Sheer Force + Life Orb is a set.
+  if (user.item === "life-orb" && totalDamage > 0 && takesIndirectDamage(user) && user.hp > 0 && !sheerForced) {
     applyRecoil(user, side, Math.max(1, Math.floor(user.maxHP / 10)), events);
+  }
+  if (user.item === "shell-bell" && totalDamage > 0 && user.hp > 0 && user.hp < user.maxHP) {
+    const healed = Math.min(user.maxHP - user.hp, Math.max(1, Math.floor(totalDamage / 8)));
+    user.hp += healed;
+    events.push({ type: "heal", side, name: user.pokemon.name, amount: healed, via: "Shell Bell" });
   }
 
   // Rapid Spin sweeps the user's own side clear on the way through.
@@ -1053,11 +1670,32 @@ function executeMove(state, side, moveIndex, events, rng) {
   // Secondary effects need a target that is still standing and not hiding
   // behind a doll. A flinch set by the slower mover is harmless — the flag
   // resets at turn start, so it only ever robs a target that hasn't moved yet.
-  if (foe.hp > 0 && hitTheTarget) {
-    applyTargetSecondary(state, side, move, events, rng);
-    const flinchPct = move.meta?.flinchChance ?? 0;
-    if (flinchPct > 0 && foe.ability !== "inner-focus" && rng.chance(flinchPct / 100)) {
+  //
+  // Sheer Force and Shield Dust both cancel the extra effect outright — one
+  // because it sold it for power, the other because it refuses to be bothered.
+  const secondariesOff = sheerForced || foeAbility === "shield-dust";
+  if (foe.hp > 0 && hitTheTarget && !secondariesOff) {
+    applyTargetSecondary(state, side, move, events, rng, { weather, foeAbility });
+    // Serene Grace doubles the odds; King's Rock and Stench add a flinch to
+    // moves that never had one.
+    const grace = user.ability === "serene-grace" ? 2 : 1;
+    let flinchPct = (move.meta?.flinchChance ?? 0) * grace;
+    if (flinchPct === 0 && (user.item === "kings-rock" || user.ability === "stench")) flinchPct = 10;
+    if (flinchPct > 0 && foeAbility !== "inner-focus" && rng.chance(Math.min(1, flinchPct / 100))) {
       foe.flinched = true;
+    }
+  }
+
+  // Moxie and its cousins take their boost the moment the target goes down,
+  // and Aftermath takes its pound of flesh on the way out.
+  if (foe.hp <= 0 && totalDamage > 0) {
+    if (foe.ability === "aftermath" && contact && takesIndirectDamage(user) && user.hp > 0) {
+      chip(user, side, Math.max(1, Math.floor(user.maxHP / 4)), "Aftermath", events);
+    }
+    if (user.hp > 0) {
+      const koStat = KO_BOOST_STAT[user.ability]
+        ?? (user.ability === "beast-boost" ? bestStatKey(user) : null);
+      if (koStat) applyStatChanges(user, side, [{ stat: koStat, change: 1 }], events);
     }
   }
 
@@ -1077,11 +1715,112 @@ function executeMove(state, side, moveIndex, events, rng) {
 }
 
 /**
+ * Everything the target does about having just been hit, in this fixed order:
+ *
+ *   1. Anger Point answers a critical hit
+ *   2. the type-reading reactions — Justified, Rattled, Water Compaction
+ *   3. Stamina and Weak Armor, which answer any hit at all
+ *   4. Berserk, which needs the HP to have crossed halfway on THIS hit
+ *   5. a Weakness Policy, which needs the hit to have been super effective
+ *   6. contact: the chip abilities and Rocky Helmet
+ *   7. contact: the abilities that hand out a status or a stat drop
+ *   8. the attacker's own Poison Touch
+ *
+ * All of it fires per hit, so a five-hit Bullet Seed into Rough Skin really
+ * does cost the attacker five eighths of its health.
+ */
+function reactToHit(state, attackerSide, move, ctx, events, rng) {
+  const { crit, isPhysical, eff, wasAboveHalf, contact, weather } = ctx;
+  const user = active(state, attackerSide);
+  const foe = active(state, 1 - attackerSide);
+  const foeSide = 1 - attackerSide;
+  const ab = foe.ability;
+  // A stat drop the attacker's ability might refuse, e.g. Gooey into Clear Body.
+  const onUser = (changes) =>
+    applyStatChanges(user, attackerSide, changes, events, { fromFoe: true, ability: seenAbility(foe, user) });
+
+  if (crit && ab === "anger-point") {
+    applyStatChanges(foe, foeSide, [{ stat: "atk", change: 12 }], events);
+  }
+  if (ab === "justified" && move.type === "dark") {
+    applyStatChanges(foe, foeSide, [{ stat: "atk", change: 1 }], events);
+  }
+  if (ab === "rattled" && ["bug", "ghost", "dark"].includes(move.type)) {
+    applyStatChanges(foe, foeSide, [{ stat: "spe", change: 1 }], events);
+  }
+  if (ab === "water-compaction" && move.type === "water") {
+    applyStatChanges(foe, foeSide, [{ stat: "def", change: 2 }], events);
+  }
+  if (ab === "stamina") {
+    applyStatChanges(foe, foeSide, [{ stat: "def", change: 1 }], events);
+  }
+  if (ab === "weak-armor" && isPhysical) {
+    applyStatChanges(foe, foeSide, [{ stat: "def", change: -1 }, { stat: "spe", change: 2 }], events);
+  }
+  if (ab === "berserk" && wasAboveHalf && foe.hp * 2 <= foe.maxHP) {
+    applyStatChanges(foe, foeSide, [{ stat: "spa", change: 1 }], events);
+  }
+
+  if (foe.item === "weakness-policy" && eff > 1) {
+    consumeItem(foe, foeSide, "Weakness Policy", events);
+    applyStatChanges(foe, foeSide, [{ stat: "atk", change: 2 }, { stat: "spa", change: 2 }], events);
+  }
+
+  if (contact) {
+    if (CHIP_ON_CONTACT.has(ab) && takesIndirectDamage(user)) {
+      chip(user, attackerSide, Math.max(1, Math.floor(user.maxHP / 8)), ABILITIES[ab].name, events);
+    }
+    if (foe.item === "rocky-helmet" && takesIndirectDamage(user)) {
+      chip(user, attackerSide, Math.max(1, Math.floor(user.maxHP / 6)), "Rocky Helmet", events);
+    }
+    if (user.hp > 0) {
+      const status = CONTACT_STATUS_ABILITY[ab];
+      if (status && rng.chance(0.3)) {
+        inflictStatus(user, attackerSide, status, events, rng, { weather });
+      } else if (ab === "effect-spore" && rng.chance(0.3)) {
+        // The published split is 9% poison, 10% paralysis, 11% sleep; inside
+        // the 30% that fired, that's an even-ish three-way pick.
+        const roll = rng.int(30);
+        const spore = roll < 9 ? "poison" : roll < 19 ? "paralysis" : "sleep";
+        inflictStatus(user, attackerSide, spore, events, rng, { weather });
+      } else if (SPEED_STAT_LOWER_ON_CONTACT.has(ab)) {
+        onUser([{ stat: "spe", change: -1 }]);
+      } else if (ab === "cursed-body" && user.vol.lastMoveIndex != null && !user.vol.disable && rng.chance(0.3)) {
+        user.vol.disable = { moveIndex: user.vol.lastMoveIndex, turns: 4 };
+        events.push({ type: "disabled", side: attackerSide, name: user.pokemon.name, move: move.name });
+      }
+    }
+    if (user.ability === "poison-touch" && foe.hp > 0 && rng.chance(0.3)) {
+      inflictStatus(foe, foeSide, "poison", events, rng, { weather, ability: seenAbility(user, foe) });
+    }
+  }
+}
+
+/** Whichever of the five non-HP stats is highest — what Beast Boost picks. */
+function bestStatKey(b) {
+  const keys = ["atk", "def", "spa", "spd", "spe"];
+  return keys.reduce((best, k) => (b.stats[k] > b.stats[best] ? k : best), "atk");
+}
+
+/**
+ * Does this move carry an extra effect at all? Sheer Force trades exactly this
+ * away for 1.3× power, so the question has to be asked the same way every time:
+ * a chance-based status, a flinch, or a stat change aimed at the target.
+ */
+function hasSecondaryEffect(move) {
+  if (move.category === "status") return false;
+  if ((move.meta?.ailmentChance ?? 0) > 0) return true;
+  if ((move.meta?.flinchChance ?? 0) > 0) return true;
+  if (move.statChanges?.length && !statChangesHitUser(move)) return true;
+  return false;
+}
+
+/**
  * The power a move swings with before Technician and the pinch abilities:
  * momentum doubling (Rollout, Fury Cutter), Solar Beam's bad-weather penalty,
  * and the bonus for catching something underground or in the air.
  */
-function movePower(state, side, move, { foeHiding }) {
+function movePower(state, side, move, { foeHiding, weather = state.weather.kind }) {
   const user = active(state, side);
   let power = move.power;
 
@@ -1092,7 +1831,7 @@ function movePower(state, side, move, { foeHiding }) {
   }
 
   const chargeInfo = CHARGE_MOVES[move.slug];
-  if (chargeInfo?.weakIn?.includes(state.weather.kind)) power = Math.floor(power / 2);
+  if (chargeInfo?.weakIn?.includes(weather)) power = Math.floor(power / 2);
 
   if (foeHiding && DOUBLES_ON_INVULN[foeHiding].includes(move.slug)) power *= 2;
 
@@ -1192,8 +1931,8 @@ function hitSelfInConfusion(user, side, events, rng) {
   });
 }
 
-function confuse(target, targetSide, events, rng) {
-  if (target.ability === "own-tempo") {
+function confuse(target, targetSide, events, rng, { ability = target.ability } = {}) {
+  if (ability === "own-tempo" || ability === "oblivious") {
     events.push({ type: "immune", side: targetSide, name: target.pokemon.name });
     return;
   }
@@ -1205,6 +1944,10 @@ function confuse(target, targetSide, events, rng) {
   // stored number is "attempts left including this one".
   target.vol.confusion = 2 + (rng ? rng.int(4) : 2);
   events.push({ type: "confused", side: targetSide, name: target.pokemon.name });
+  if (target.item === "lum-berry" && canEatBerry(target)) {
+    target.vol.confusion = 0;
+    consumeItem(target, targetSide, "Lum Berry", events);
+  }
 }
 
 /* ---------------------------------------------------------- status moves --- */
@@ -1214,23 +1957,24 @@ function applyStatusMove(state, side, move, events, rng) {
   const foe = active(state, 1 - side);
   const onSelf = !targetsFoe(move);
 
-  // Weather setters.
+  // Weather setters. The rock that stretches it to eight turns is the
+  // setter's, so setWeather is handed the user.
   if (WEATHER_MOVES[move.slug]) {
-    setWeather(state, WEATHER_MOVES[move.slug], events);
+    setWeather(state, WEATHER_MOVES[move.slug], events, user);
     return;
   }
 
   // Screens, Tailwind and Trick Room: the timed field effects.
   const screen = SCREEN_MOVES[move.slug];
   if (screen) {
-    if (screen === "auroraVeil" && state.weather.kind !== "snow") {
+    if (screen === "auroraVeil" && weatherOf(state) !== "snow") {
       events.push({ type: "moveFailed", side, name: user.pokemon.name, move: move.name, why: "it needs snow" });
       return;
     }
     const screens = state.teams[side].screens;
     if (screens[screen] > 0) return events.push({ type: "noEffect" });
-    screens[screen] = 5;
-    events.push({ type: "screenSet", side, screen: move.name });
+    screens[screen] = user.item === "light-clay" ? 8 : 5;
+    events.push({ type: "screenSet", side, screen: move.name, turns: screens[screen] });
     return;
   }
   if (move.slug === "tailwind") {
@@ -1261,6 +2005,7 @@ function applyStatusMove(state, side, move, events, rng) {
       return;
     }
     user.vol.protect = true;
+    user.vol.protectedWith = move.slug;
     user.vol.protectStreak += 1;
     events.push({ type: "protecting", side, name: user.pokemon.name, move: move.name });
     return;
@@ -1321,8 +2066,12 @@ function applyStatusMove(state, side, move, events, rng) {
   // Taunt, Encore and Disable: three different ways to take a move away.
   if (move.slug === "taunt") {
     if (foe.vol.taunt > 0) return events.push({ type: "noEffect", side: 1 - side, name: foe.pokemon.name });
+    if (foe.ability === "oblivious") {
+      return events.push({ type: "moveBlocked", side: 1 - side, name: foe.pokemon.name, move: move.name, by: "Oblivious" });
+    }
     foe.vol.taunt = 3;
     events.push({ type: "taunted", side: 1 - side, name: foe.pokemon.name });
+    shakeOffWithMentalHerb(foe, 1 - side, events);
     return;
   }
   if (move.slug === "encore") {
@@ -1334,6 +2083,7 @@ function applyStatusMove(state, side, move, events, rng) {
       type: "encored", side: 1 - side, name: foe.pokemon.name,
       move: foe.moves[foe.vol.lastMoveIndex]?.move.name ?? "its last move",
     });
+    shakeOffWithMentalHerb(foe, 1 - side, events);
     return;
   }
   if (move.slug === "disable") {
@@ -1345,6 +2095,7 @@ function applyStatusMove(state, side, move, events, rng) {
       type: "disabled", side: 1 - side, name: foe.pokemon.name,
       move: foe.moves[foe.vol.lastMoveIndex]?.move.name ?? "its last move",
     });
+    shakeOffWithMentalHerb(foe, 1 - side, events);
     return;
   }
 
@@ -1397,7 +2148,10 @@ function applyStatusMove(state, side, move, events, rng) {
     if (!onSelf && foe.vol.sub > 0) {
       events.push({ type: "subBlocked", side: 1 - side, name: foe.pokemon.name });
     } else {
-      applyStatChanges(target, targetSide, move.statChanges, events, { fromFoe: !onSelf });
+      applyStatChanges(target, targetSide, move.statChanges, events, {
+        fromFoe: !onSelf,
+        ability: onSelf ? user.ability : seenAbility(user, foe),
+      });
     }
   }
 
@@ -1406,10 +2160,10 @@ function applyStatusMove(state, side, move, events, rng) {
   const status = ailmentToStatus(ailment, move.slug);
   if (status) {
     if (foe.vol.sub > 0) events.push({ type: "subBlocked", side: 1 - side, name: foe.pokemon.name });
-    else inflictStatus(foe, 1 - side, status, events, rng);
+    else inflictStatus(foe, 1 - side, status, events, rng, { weather: weatherOf(state), ability: seenAbility(user, foe) });
   } else if (VOLATILE_AILMENTS.has(ailment)) {
     if (foe.vol.sub > 0) events.push({ type: "subBlocked", side: 1 - side, name: foe.pokemon.name });
-    else applyVolatileAilment(state, side, move, ailment, events, rng);
+    else applyVolatileAilment(state, side, move, ailment, events, rng, { ability: seenAbility(user, foe) });
   } else if (!move.statChanges?.length && !move.meta?.healing) {
     // A status move we don't model yet. Say so instead of pretending.
     events.push({ type: "notModeled", side, move: move.name });
@@ -1421,12 +2175,12 @@ function applyStatusMove(state, side, move, events, rng) {
  * trapping, Leech Seed and Yawn. Perish Song and Disable are handled by slug
  * above because they need more than the ailment name gives us.
  */
-function applyVolatileAilment(state, side, move, ailment, events, rng) {
+function applyVolatileAilment(state, side, move, ailment, events, rng, { ability } = {}) {
   const foe = active(state, 1 - side);
   const foeSide = 1 - side;
 
   if (ailment === "confusion") {
-    confuse(foe, foeSide, events, rng);
+    confuse(foe, foeSide, events, rng, { ability: ability ?? foe.ability });
     return;
   }
   if (ailment === "trap") {
@@ -1455,7 +2209,21 @@ function applyVolatileAilment(state, side, move, ailment, events, rng) {
   events.push({ type: "notModeled", side, move: move.name });
 }
 
-function applyStatChanges(target, targetSide, changes, events, { fromFoe = false } = {}) {
+/**
+ * Move every stage the list asks for.
+ *
+ * Order inside one change: Substitute turns a foe's drop away first, then
+ * Contrary flips it or Simple doubles it, and only then do the guard abilities
+ * look at what is left. That order is why Contrary + Clear Body isn't a
+ * contradiction — a Contrary'd "drop" is a rise, and Clear Body has no quarrel
+ * with a rise.
+ *
+ * `ability` is the target's ability as the mover sees it, so Mold Breaker can
+ * lower a Clear Body Pokémon's stats.
+ */
+function applyStatChanges(target, targetSide, changes, events, { fromFoe = false, ability = target.ability } = {}) {
+  let loweredByFoe = false;
+
   for (const { stat, change } of changes) {
     const key = stat === "accuracy" ? "acc" : stat === "evasion" ? "eva" : stat;
     if (!(key in target.stages)) continue;
@@ -1463,16 +2231,72 @@ function applyStatChanges(target, targetSide, changes, events, { fromFoe = false
       events.push({ type: "subBlocked", side: targetSide, name: target.pokemon.name });
       continue;
     }
+
+    let delta = change;
+    if (ability === "contrary") delta = -delta;
+    else if (ability === "simple") delta *= 2;
+
+    if (fromFoe && delta < 0) {
+      const guard =
+        STAT_LOCKED.has(ability) ? ABILITIES[ability].name
+        : key === "atk" && ability === "hyper-cutter" ? "Hyper Cutter"
+        : key === "def" && ability === "big-pecks" ? "Big Pecks"
+        : key === "acc" && CLEAR_SIGHTED.has(ability) ? ABILITIES[ability].name
+        : null;
+      if (guard) {
+        events.push({ type: "statsBlocked", side: targetSide, name: target.pokemon.name, stat: key, by: guard });
+        continue;
+      }
+    }
+
     const before = target.stages[key];
-    target.stages[key] = Math.max(-6, Math.min(6, before + change));
+    target.stages[key] = Math.max(-6, Math.min(6, before + delta));
+    const moved = target.stages[key] - before;
     events.push({
       type: "stages", side: targetSide, name: target.pokemon.name,
-      stat: key, change: target.stages[key] - before, now: target.stages[key],
+      stat: key, change: moved, now: target.stages[key],
     });
+    if (fromFoe && moved < 0) loweredByFoe = true;
+  }
+
+  // A White Herb wipes every drop off the board, whoever caused it.
+  if (target.item === "white-herb" && Object.values(target.stages).some((s) => s < 0)) {
+    for (const key of Object.keys(target.stages)) target.stages[key] = Math.max(0, target.stages[key]);
+    consumeItem(target, targetSide, "White Herb", events);
+  }
+
+  // Defiant and Competitive answer back — and answering back is not the foe
+  // lowering anything, so it can't set this off again.
+  if (loweredByFoe) {
+    if (target.ability === "defiant") {
+      applyStatChanges(target, targetSide, [{ stat: "atk", change: 2 }], events);
+    } else if (target.ability === "competitive") {
+      applyStatChanges(target, targetSide, [{ stat: "spa", change: 2 }], events);
+    }
   }
 }
 
-function inflictStatus(target, targetSide, status, events, rng) {
+/** Spend a held item: the slot empties, which is what Unburden watches for. */
+function consumeItem(b, side, label, events) {
+  b.item = null;
+  b.vol.unburdened = true;
+  events.push({ type: "itemUsed", side, name: b.pokemon.name, item: label });
+}
+
+/**
+ * Hand out a status. Everything that can refuse one gets its say here: the
+ * type immunities, the abilities built to shrug it off, Leaf Guard while the
+ * sun is out, and a Lum Berry eaten the instant it lands.
+ */
+function shakeOffWithMentalHerb(b, side, events) {
+  if (b.item !== "mental-herb") return;
+  b.vol.taunt = 0;
+  b.vol.encore = null;
+  b.vol.disable = null;
+  consumeItem(b, side, "Mental Herb", events);
+}
+
+function inflictStatus(target, targetSide, status, events, rng, { weather = null, ability = target.ability } = {}) {
   if (target.status) {
     events.push({ type: "noEffect", side: targetSide, name: target.pokemon.name });
     return;
@@ -1482,13 +2306,32 @@ function inflictStatus(target, targetSide, status, events, rng) {
     events.push({ type: "immune", side: targetSide, name: target.pokemon.name });
     return;
   }
+  const proof =
+    STATUS_PROOF_ABILITY[status]?.has(ability) ? ABILITIES[ability].name
+    : status === "sleep" && SLEEP_PROOF.has(ability) ? ABILITIES[ability].name
+    : ability === "leaf-guard" && weather === "sun" ? "Leaf Guard"
+    : null;
+  if (proof) {
+    events.push({ type: "statusBlocked", side: targetSide, name: target.pokemon.name, by: proof });
+    return;
+  }
+
   target.status = status;
   // Sleeps for 1-3 turns: the counter is checked-then-decremented on each
   // move attempt, and the waking turn still gets to move.
   if (status === "sleep") target.sleepTurns = 2 + (rng ? rng.int(3) : 1);
   if (status === "toxic") target.toxicCounter = 0;
   events.push({ type: "status", side: targetSide, name: target.pokemon.name, status });
+
+  if (target.item === "lum-berry" && canEatBerry(target)) {
+    target.status = null;
+    target.sleepTurns = 0;
+    consumeItem(target, targetSide, "Lum Berry", events);
+  }
 }
+
+/** Unnerve is the only thing that stops a berry going down. */
+const canEatBerry = (b) => BERRIES.has(b.item) && !b.vol.unnerved;
 
 /**
  * The user's half of a damaging move's stat changes — Draco Meteor dropping
@@ -1505,22 +2348,28 @@ function applySelfStatChanges(state, side, move, events, rng) {
   applyStatChanges(active(state, side), side, move.statChanges, events);
 }
 
-/** Chance-based extras a damaging move lands ON THE TARGET. */
-function applyTargetSecondary(state, side, move, events, rng) {
+/**
+ * Chance-based extras a damaging move lands ON THE TARGET. Serene Grace
+ * doubles every one of those chances, which is the whole ability.
+ */
+function applyTargetSecondary(state, side, move, events, rng, { weather = null, foeAbility } = {}) {
+  const user = active(state, side);
   const foe = active(state, 1 - side);
+  const ability = foeAbility ?? foe.ability;
+  const grace = user.ability === "serene-grace" ? 2 : 1;
   const ailment = move.meta?.ailment ?? "none";
-  const ailmentChance = move.meta?.ailmentChance ?? 0;
+  const ailmentChance = (move.meta?.ailmentChance ?? 0) * grace;
 
-  if (ailmentChance > 0 && rng.chance(ailmentChance / 100)) {
+  if (ailmentChance > 0 && rng.chance(Math.min(1, ailmentChance / 100))) {
     const status = ailmentToStatus(ailment, move.slug);
-    if (status) inflictStatus(foe, 1 - side, status, events, rng);
-    else if (VOLATILE_AILMENTS.has(ailment)) applyVolatileAilment(state, side, move, ailment, events, rng);
+    if (status) inflictStatus(foe, 1 - side, status, events, rng, { weather, ability });
+    else if (VOLATILE_AILMENTS.has(ailment)) applyVolatileAilment(state, side, move, ailment, events, rng, { ability });
   }
 
   if (move.statChanges?.length && !statChangesHitUser(move)) {
-    const chance = move.effectChance ?? 100;
-    if (chance >= 100 || rng.chance(chance / 100)) {
-      applyStatChanges(foe, 1 - side, move.statChanges, events, { fromFoe: true });
+    const chance = (move.effectChance ?? 100) * grace;
+    if (chance >= 100 || rng.chance(Math.min(1, chance / 100))) {
+      applyStatChanges(foe, 1 - side, move.statChanges, events, { fromFoe: true, ability });
     }
   }
 }
@@ -1532,8 +2381,10 @@ function applyTargetSecondary(state, side, move, events, rng) {
  *
  *   1. Future Sight / Doom Desire arrive from two turns ago
  *   2. per side, in the same order the sides moved:
- *      weather → status chip → Leech Seed → trapping chip → Wish →
- *      Leftovers → Sitrus → Speed Boost → Yawn → Perish Song
+ *      weather (chip, then the abilities that read it) → status chip →
+ *      Leech Seed → trapping chip → Wish → Leftovers/Black Sludge →
+ *      Sitrus/Oran → Speed Boost → Shed Skin/Hydration → Flame/Toxic Orb →
+ *      Yawn → Perish Song
  *   3. every counter on the field ticks down
  *
  * The order matters — a Pokémon on 4 HP with a burn and a Wish incoming lives
@@ -1541,7 +2392,16 @@ function applyTargetSecondary(state, side, move, events, rng) {
  */
 function endOfTurn(state, moveOrder, events, rng) {
   const sandImmune = (b) =>
-    ["rock", "ground", "steel"].some((t) => b.pokemon.types.includes(t));
+    ["rock", "ground", "steel"].some((t) => b.pokemon.types.includes(t)) ||
+    ["sand-veil", "sand-rush", "sand-force", "overcoat", "magic-guard"].includes(b.ability) ||
+    b.item === "safety-goggles";
+  const weather = weatherOf(state);
+  const heal = (b, side, amount, via) => {
+    const healed = Math.min(b.maxHP - b.hp, Math.max(1, amount));
+    if (healed <= 0) return;
+    b.hp += healed;
+    events.push({ type: "heal", side, name: b.pokemon.name, amount: healed, via });
+  };
 
   for (const side of [0, 1]) resolveFutureSight(state, side, events, rng);
   checkFaint(state, events);
@@ -1551,14 +2411,38 @@ function endOfTurn(state, moveOrder, events, rng) {
     const b = active(state, side);
     if (b.hp <= 0) continue;
 
-    if (state.weather.kind === "sand" && !sandImmune(b) && takesIndirectDamage(b)) {
+    if (weather === "sand" && !sandImmune(b) && takesIndirectDamage(b)) {
       chip(b, side, Math.max(1, Math.floor(b.maxHP / 16)), "sandstorm", events);
     }
     if (b.hp <= 0) continue;
 
-    if (takesIndirectDamage(b)) {
+    // The abilities that live off the weather, good and bad.
+    if (weather === "rain" && b.ability === "rain-dish" && b.hp < b.maxHP) {
+      heal(b, side, Math.floor(b.maxHP / 16), "Rain Dish");
+    }
+    if (weather === "snow" && b.ability === "ice-body" && b.hp < b.maxHP) {
+      heal(b, side, Math.floor(b.maxHP / 16), "Ice Body");
+    }
+    if (b.ability === "dry-skin") {
+      if (weather === "rain" && b.hp < b.maxHP) heal(b, side, Math.floor(b.maxHP / 8), "Dry Skin");
+      else if (weather === "sun" && takesIndirectDamage(b)) {
+        chip(b, side, Math.max(1, Math.floor(b.maxHP / 8)), "Dry Skin", events);
+      }
+    }
+    if (weather === "sun" && b.ability === "solar-power" && takesIndirectDamage(b)) {
+      chip(b, side, Math.max(1, Math.floor(b.maxHP / 8)), "Solar Power", events);
+    }
+    if (b.hp <= 0) continue;
+
+    // Poison Heal turns the poison right round; everything else chips.
+    if (b.ability === "poison-heal" && (b.status === "poison" || b.status === "toxic")) {
+      if (b.status === "toxic") b.toxicCounter += 1;
+      if (b.hp < b.maxHP) heal(b, side, Math.floor(b.maxHP / 8), "Poison Heal");
+    } else if (takesIndirectDamage(b)) {
       if (b.status === "burn") {
-        chip(b, side, Math.max(1, Math.floor(b.maxHP / 16)), "burn", events);
+        // Heatproof halves what a burn takes out of it, as well as Fire moves.
+        const frac = b.ability === "heatproof" ? 32 : 16;
+        chip(b, side, Math.max(1, Math.floor(b.maxHP / frac)), "burn", events);
       } else if (b.status === "poison") {
         chip(b, side, Math.max(1, Math.floor(b.maxHP / 8)), "poison", events);
       } else if (b.status === "toxic") {
@@ -1617,25 +2501,50 @@ function endOfTurn(state, moveOrder, events, rng) {
     }
 
     if (b.item === "leftovers" && b.hp < b.maxHP) {
-      const healed = Math.min(b.maxHP - b.hp, Math.max(1, Math.floor(b.maxHP / 16)));
-      b.hp += healed;
-      events.push({ type: "heal", side, name: b.pokemon.name, amount: healed, via: "Leftovers" });
+      heal(b, side, Math.floor(b.maxHP / 16), "Leftovers");
     }
-    if (b.item === "sitrus-berry" && !b.berryUsed && b.hp * 2 <= b.maxHP) {
-      const healed = Math.min(b.maxHP - b.hp, Math.floor(b.maxHP / 4));
-      b.hp += healed;
+    // Black Sludge is Leftovers for a Poison type and a slow puncture for
+    // everyone else, which is the joke and also the mechanic.
+    if (b.item === "black-sludge") {
+      if (b.pokemon.types.includes("poison")) {
+        if (b.hp < b.maxHP) heal(b, side, Math.floor(b.maxHP / 16), "Black Sludge");
+      } else if (takesIndirectDamage(b)) {
+        chip(b, side, Math.max(1, Math.floor(b.maxHP / 8)), "Black Sludge", events);
+      }
+    }
+    if (b.hp <= 0) continue;
+
+    if (b.item === "sitrus-berry" && canEatBerry(b) && b.hp * 2 <= b.maxHP) {
       b.berryUsed = true;
-      b.item = null;
-      events.push({ type: "heal", side, name: b.pokemon.name, amount: healed, via: "Sitrus Berry" });
+      heal(b, side, Math.floor(b.maxHP / 4), "Sitrus Berry");
+      consumeItem(b, side, "Sitrus Berry", events);
+    } else if (b.item === "oran-berry" && canEatBerry(b) && b.hp * 2 <= b.maxHP) {
+      heal(b, side, 10, "Oran Berry");
+      consumeItem(b, side, "Oran Berry", events);
     }
     if (b.ability === "speed-boost") {
       applyStatChanges(b, side, [{ stat: "spe", change: 1 }], events);
     }
 
+    // Two ways of shrugging a status off, and two orbs that hand one over.
+    if (b.status && b.ability === "shed-skin" && rng.chance(1 / 3)) {
+      b.status = null;
+      b.sleepTurns = 0;
+      events.push({ type: "cured", side, name: b.pokemon.name, by: "Shed Skin" });
+    }
+    if (b.status && b.ability === "hydration" && weather === "rain") {
+      b.status = null;
+      b.sleepTurns = 0;
+      events.push({ type: "cured", side, name: b.pokemon.name, by: "Hydration" });
+    }
+    if (!b.status && (b.item === "flame-orb" || b.item === "toxic-orb")) {
+      inflictStatus(b, side, b.item === "flame-orb" ? "burn" : "toxic", events, rng, { weather });
+    }
+
     // Yawn catches up with it.
     if (b.vol.drowsy > 0) {
       b.vol.drowsy -= 1;
-      if (b.vol.drowsy === 0) inflictStatus(b, side, "sleep", events, rng);
+      if (b.vol.drowsy === 0) inflictStatus(b, side, "sleep", events, rng, { weather });
     }
 
     // Perish Song counts everyone down together.

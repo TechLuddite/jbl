@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { POKEDEX, legalMoves } from "../data/index.js";
 import { ITEMS } from "../lib/sim.js";
-import { TypeChip, Field, PokemonSelect, MoveSelect } from "../components.jsx";
+import { TypeChip, Field, PokemonSelect, MoveSelect, ItemSelect, AbilitySelect } from "../components.jsx";
 import * as storage from "../lib/storage.js";
 import BattleRunner, { newSlot, dexOf, abilityOptions } from "./BattleRunner.jsx";
 
@@ -194,20 +194,9 @@ function TeamSlot({ slot, onChange, onRemove }) {
         </span>
       </div>
       <div style={{ display: "grid", gap: 4, gridTemplateColumns: "1fr 1fr", marginBottom: 6 }}>
-        <select className="fld" title="Held item" value={slot.item}
-                onChange={(e) => onChange({ item: e.target.value })}>
-          <option value="">— no item —</option>
-          {Object.entries(ITEMS).map(([slug, it]) => (
-            <option key={slug} value={slug} title={it.desc}>{it.name}</option>
-          ))}
-        </select>
-        <select className="fld" title="Ability" value={slot.ability}
-                onChange={(e) => onChange({ ability: e.target.value })}>
-          <option value="">— no ability —</option>
-          {abilityOptions(p).map((o) => (
-            <option key={o.slug} value={o.slug}>{o.label}</option>
-          ))}
-        </select>
+        <ItemSelect items={ITEMS} value={slot.item} onChange={(item) => onChange({ item })} />
+        <AbilitySelect options={abilityOptions(p)} value={slot.ability}
+                       onChange={(ability) => onChange({ ability })} />
       </div>
       <div style={{ display: "grid", gap: 4, gridTemplateColumns: "1fr 1fr" }}>
         {[0, 1, 2, 3].map((i) => (

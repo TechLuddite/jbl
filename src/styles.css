@@ -153,6 +153,9 @@ body {
 .pokepick-list { max-height: 220px; overflow-y: auto; margin-top: 6px;
                  font-family: "IBM Plex Mono", monospace; font-size: 13px; }
 .pokepick-opt { padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+/* Item and ability rows carry their description, so they wrap; the closed
+   button never does — it shows the short form and clips. */
+.pokepick-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pokepick-group { padding: 8px 8px 2px; font-size: 10px; letter-spacing: 0.08em;
                   text-transform: uppercase; color: var(--ink-soft); }
 .pokepick-opt[data-active] { background: var(--screen-dim); }
