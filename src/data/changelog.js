@@ -19,6 +19,27 @@
 
 export const CHANGELOG = [
   {
+    date: "2026-08-08",
+    title: "A proper Pokédex",
+    credit: "Suggested by Joseph",
+    intro:
+      "There's a new tab. Pick any Pokémon and you get the big painted picture, " +
+      "its Pokédex entry straight out of the games, how tall and heavy it is, " +
+      "what it evolves into, what beats it, and every move it can learn.",
+    changes: [
+      { kind: "new", text: "The Pokédex tab. One Pokémon at a time, with a proper picture instead of the little battle sprite." },
+      { kind: "new", text: "The bio is the real Pokédex entry from the games, and it says underneath which game it's quoted from. Nothing on the page is made up about a Pokémon." },
+      { kind: "new", text: "Height, weight, how likely it is to be male or female, how hard it is to catch, its egg groups and how long its egg takes to hatch." },
+      { kind: "new", text: "Every ability it can have, with what the ability actually does. If the Battle tab doesn't know that ability yet, it says so instead of pretending." },
+      { kind: "new", text: "Its whole evolution line and what it takes to get there — a level, a stone, a trade. Tap any stage to jump to it." },
+      { kind: "new", text: "What it takes more damage from and what it shrugs off, worked out from its types, with 4× and ¼× shown properly." },
+      { kind: "new", text: "Every move it can learn. Switch between the order it learns them as it levels up and the whole list, and search inside it." },
+      { kind: "new", text: "On the Stats tab there's a little arrow next to every name. Press it and you land on that Pokémon's full Pokédex page." },
+      { kind: "fix", text: "Gen 1 Pokémon had forgotten everything they'd learned since 1996. Mewtwo could only pick from 43 moves and Bulbasaur from 23 — Mewtwo now has 102 and Bulbasaur 48. It affected 187 Pokémon, and it was making the Battle tab much duller than it should have been." },
+      { kind: "fix", text: "Move lists now all come from Scarlet and Violet. A few Pokémon — Machamp, Lopunny, Aggron — had been picking their moves up from a battle-only spin-off instead, so they've lost some options they wouldn't really have. What's left is what they can actually learn in the game." },
+    ],
+  },
+  {
     date: "2026-08-06",
     title: "Abilities and items, properly this time",
     credit: "Spotted by Joseph",

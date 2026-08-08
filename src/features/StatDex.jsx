@@ -8,7 +8,32 @@ const STAT_LABELS = {
   spa: "Sp. Atk", spd: "Sp. Def", spe: "Speed",
 };
 
-export default function StatDex() {
+/**
+ * "Open this one in the Pokédex". Sits right next to the name, because that is
+ * the thing you've just read and want to know more about. It's inside a row
+ * that's itself clickable, so it has to stop the click from also expanding the
+ * row behind it.
+ */
+function DexLink({ pokemon, onOpen }) {
+  if (!onOpen) return null;
+  return (
+    <button
+      className="dex-link"
+      title={`Open ${pokemon.name} in the Pokédex`}
+      aria-label={`Open ${pokemon.name} in the Pokédex`}
+      onClick={(e) => { e.stopPropagation(); onOpen(pokemon.id); }}
+    >
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none"
+           stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9.5 2h4.5v4.5" />
+        <path d="M14 2 8.5 7.5" />
+        <path d="M12.5 9.5V13a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V5A1.5 1.5 0 0 1 3 3.5h3.5" />
+      </svg>
+    </button>
+  );
+}
+
+export default function StatDex({ openDex }) {
   const [sortStat, setSortStat] = useState("bst");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(null);
@@ -46,6 +71,7 @@ export default function StatDex() {
         <div className="card" style={{ marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
             <strong style={{ fontSize: 17 }}>{selected.name}</strong>
+            <DexLink pokemon={selected} onOpen={openDex} />
             {selected.types.map((t) => <TypeChip key={t} type={t} />)}
             <span className="mono" style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-soft)" }}>
               BST {selected.bst}
@@ -64,6 +90,7 @@ export default function StatDex() {
 
       <div className="eyebrow">
         {rows.length} Pokémon · ranked by {sortStat === "bst" ? "base stat total" : STAT_LABELS[sortStat]}
+        {openDex && " · tap a row for its stats, or the arrow for the full Pokédex"}
       </div>
 
       {rows.length === 0 ? (
@@ -83,7 +110,10 @@ export default function StatDex() {
                 return (
                   <tr key={p.id} style={{ cursor: "pointer" }} onClick={() => setSelectedId(p.id)}>
                     <td style={{ color: "var(--ink-soft)" }}>{i + 1}</td>
-                    <td style={{ fontWeight: 600 }}>{p.name}</td>
+                    <td style={{ fontWeight: 600, whiteSpace: "nowrap" }}>
+                      {p.name}
+                      <DexLink pokemon={p} onOpen={openDex} />
+                    </td>
                     <td>{p.types.map((t) => <TypeChip key={t} type={t} />)}</td>
                     <td>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

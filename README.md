@@ -1,6 +1,7 @@
 # Joseph's Battle Lab
 
-A Pokémon damage calculator, stat explorer, and family league tracker.
+A Pokémon damage calculator, battle sim, Pokédex, stat explorer, and family
+league tracker.
 
 **Live: https://jbl.opsvibe.systems**
 
@@ -18,7 +19,8 @@ npm run dev
 Runs on the bundled 52-Pokémon sample set. For the full dex:
 
 ```bash
-npm run refresh-dex   # ~5-10 min, writes src/data/*.json
+npm run refresh-dex       # ~5-10 min, writes src/data/pokedex.json + moves.json
+npm run refresh-species   # ~5-10 min, the Pokédex tab's bios, sizes, evolutions
 ```
 
 Commit the generated JSON. The app never calls PokéAPI at runtime.
@@ -33,6 +35,7 @@ Commit the generated JSON. The app never calls PokéAPI at runtime.
 | `npm run build` | Production build to `dist/` |
 | `npm run preview` | Serve the built output locally |
 | `npm run refresh-dex` | Re-bake the full dex from PokéAPI |
+| `npm run refresh-species` | Re-bake the Pokédex details (bios, sizes, evolutions, abilities) |
 
 ## Deploying
 
@@ -60,10 +63,10 @@ workflow fails the build if it goes missing.
 ## Project layout
 
 ```
-src/lib/       battle math (tested), type chart, natures, storage
+src/lib/       battle math (tested), sim engine, type chart, natures, storage
 src/data/      dex data — sample set committed, full set generated
-src/features/  DamageCalc, League, StatDex
-scripts/       build-dex.mjs — PokéAPI → static JSON
+src/features/  DamageCalc, BattleSim, League, StatDex, Dex, News, Report
+scripts/       build-*.mjs — PokéAPI → static JSON, run by hand
 ```
 
 `src/lib/battle.js` is the reference implementation for all game maths and is

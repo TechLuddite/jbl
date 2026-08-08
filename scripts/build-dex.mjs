@@ -26,6 +26,7 @@
  */
 
 import { writeFile, mkdir } from "node:fs/promises";
+import { rankVersionGroups } from "./version-groups.mjs";
 
 const API = "https://pokeapi.co/api/v2";
 const CONCURRENCY = 8; // be polite
@@ -87,17 +88,12 @@ function titleCase(slug) {
 }
 
 /**
- * Version groups in release order, slug → rank. PokéAPI ids are already
- * chronological, so the id doubles as the rank.
+ * Version groups in release order, slug → rank. Which games count, and why an
+ * id is not a date, is all in version-groups.mjs.
  */
 async function buildVersionGroupRanks() {
-  const index = await getJSON(`${API}/version-group?limit=100`);
-  const ranks = {};
-  for (const vg of index.results) {
-    const id = Number(vg.url.replace(/\/$/, "").split("/").pop());
-    ranks[vg.name] = id;
-  }
-  return ranks;
+  const index = await getJSON(`${API}/version-group?limit=200`);
+  return rankVersionGroups(index.results);
 }
 
 async function buildMoves() {

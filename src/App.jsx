@@ -3,18 +3,20 @@ import DamageCalc from "./features/DamageCalc.jsx";
 import BattleSim from "./features/BattleSim.jsx";
 import League from "./features/League.jsx";
 import StatDex from "./features/StatDex.jsx";
+import Dex from "./features/Dex.jsx";
 import News from "./features/News.jsx";
 import Report from "./features/Report.jsx";
 import { usingFullDex, POKEDEX } from "./data/index.js";
 import { LATEST } from "./data/changelog.js";
 import * as storage from "./lib/storage.js";
 
-/** The lab itself: the four tabs you actually battle with. */
+/** The lab itself: the tabs you actually battle with. */
 const TABS = [
   ["calc", "Damage", DamageCalc],
   ["battle", "Battle", BattleSim],
   ["league", "League", League],
-  ["dex", "Stats", StatDex],
+  ["stats", "Stats", StatDex],
+  ["dex", "Pokédex", Dex],
 ];
 
 /** About the app rather than about Pokémon, so they sit apart, over on the right. */
@@ -28,6 +30,18 @@ const ALL_TABS = [...TABS, ...META_TABS];
 export default function App() {
   const [tab, setTab] = useState("calc");
   const Active = ALL_TABS.find(([id]) => id === tab)[2];
+
+  /**
+   * The Stats tab's link buttons jump to the Pokédex with one Pokémon already
+   * open. The counter rides along because pressing the same link a second time
+   * — after browsing somewhere else in the Pokédex — has to move it again, and
+   * an unchanged id on its own wouldn't.
+   */
+  const [dexFocus, setDexFocus] = useState(null);
+  function openDex(id) {
+    setDexFocus((prev) => ({ id, n: (prev?.n ?? 0) + 1 }));
+    setTab("dex");
+  }
 
   // A dot on the News tab until this build's changes have been looked at.
   // Starts hidden so it can't flash on every load before storage answers.
@@ -87,7 +101,9 @@ export default function App() {
         </nav>
 
         <main className="screen">
-          <Active />
+          {/* Every tab takes the same two props and uses the ones it needs;
+              only Stats links out and only the Pokédex is linked to. */}
+          <Active openDex={openDex} focus={dexFocus} />
         </main>
       </div>
     </div>
