@@ -11,7 +11,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "refresh-dex": "node scripts/build-dex.mjs",
-    "refresh-flags": "node scripts/build-move-flags.mjs"
+    "refresh-flags": "node scripts/build-move-flags.mjs",
+    "refresh-species": "node scripts/build-species.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

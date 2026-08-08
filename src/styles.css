@@ -200,6 +200,84 @@ table.lb tr:hover td { background: #e5e9db; }
 .btn[data-disabled] { opacity: 0.45; cursor: not-allowed; }
 a.btn { text-decoration: none; display: inline-block; }
 
+/* ---- Pokédex ---- */
+/* The picture is the point of this tab, so it gets a proper panel rather than
+   being squeezed in next to the text: the same inset LCD as the main screen,
+   one size down. */
+.dex-hero { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+
+.dex-art-frame {
+  flex: none; width: 240px; height: 240px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--screen-alt); border: 1.5px solid var(--rule);
+  border-radius: 10px; box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+.dex-art { width: 100%; height: 100%; object-fit: contain; padding: 8px; }
+
+.dex-headline { flex: 1 1 260px; min-width: 0; }
+.dex-id { font-size: 11px; letter-spacing: 0.14em; color: var(--ink-soft); }
+.dex-name { font-size: 28px; letter-spacing: -0.02em; margin: 0; line-height: 1.05; }
+.dex-genus { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+             color: var(--ink-soft); }
+.dex-bio { font-size: 14.5px; line-height: 1.5; max-width: 54ch; margin: 8px 0 0; }
+.dex-bio-source { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+                  color: var(--ink-soft); margin-top: 4px; }
+.dex-rare { font-size: 11px; color: var(--amber); margin-top: 8px;
+            letter-spacing: 0.1em; text-transform: uppercase; }
+
+.dex-vitals { display: grid; gap: 8px;
+              grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.dex-vital { background: var(--screen-alt); border: 1.5px solid var(--rule);
+             border-radius: 6px; padding: 7px 9px; }
+.dex-vital-value { font-size: 12.5px; }
+
+.dex-abilities { display: grid; gap: 8px;
+                 grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.dex-ability { background: var(--screen-alt); border: 1.5px solid var(--rule);
+               border-radius: 6px; padding: 8px 10px; }
+.dex-ability-name { font-size: 13px; font-weight: 600; display: flex;
+                    align-items: center; gap: 6px; flex-wrap: wrap; }
+.dex-ability-desc { font-size: 12.5px; line-height: 1.4; color: var(--ink-soft);
+                    margin-top: 3px; }
+
+.dex-tag { font-family: "IBM Plex Mono", monospace; font-size: 9px; font-weight: 600;
+           letter-spacing: 0.1em; text-transform: uppercase;
+           padding: 2px 6px; border-radius: 3px;
+           background: var(--amber); color: var(--ink); }
+.dex-tag.quiet { background: var(--screen-dim); color: var(--ink-soft); }
+
+.dex-matchup-row { margin-bottom: 10px; }
+.dex-matchup { display: inline-flex; align-items: center; gap: 4px; }
+.dex-mult { font-size: 11px; font-weight: 600; margin-right: 4px; }
+
+.dex-evo { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+           padding: 4px 0; }
+.dex-evo-stage { font-family: "IBM Plex Mono", monospace; font-size: 13px;
+                 font-weight: 600; padding: 3px 8px; border-radius: 5px;
+                 border: 1.5px solid var(--rule-strong); background: var(--screen-alt);
+                 color: var(--ink); cursor: pointer; }
+button.dex-evo-stage:hover { background: var(--screen-dim); }
+.dex-evo-stage[data-on] { background: var(--ink); color: var(--screen);
+                          border-color: var(--ink); }
+.dex-evo-how { font-size: 11px; color: var(--ink-soft); }
+
+/* The link out of the Stats table into the Pokédex. Quiet until you're on it,
+   because there is one on every row. */
+.dex-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin-left: 6px; padding: 0; border: 0;
+  border-radius: 4px; background: transparent; color: var(--ink-soft);
+  cursor: pointer; vertical-align: -4px;
+}
+.dex-link:hover { background: var(--screen-dim); color: var(--ink); }
+.dex-link:focus-visible { outline: 2px solid var(--lens); outline-offset: 1px; }
+
+/* The two move-list toggles read as one control, so the chosen one fills in.
+   Matched on "true", not on the attribute existing: React writes a false
+   boolean out as data-on="false" rather than dropping it, and BattleRunner's
+   move buttons carry one on every slot. Same reason .tab does it this way. */
+.btn.ghost[data-on="true"] { background: var(--ink); color: var(--screen); border-color: var(--ink); }
+
 /* ---- what's new ---- */
 .news-entry { border-left: 3px solid var(--shell); padding: 2px 0 2px 14px;
               margin-bottom: 22px; }
@@ -228,6 +306,10 @@ textarea.fld { resize: vertical; line-height: 1.45; }
 @media (max-width: 560px) {
   .screen { padding: 12px; }
   .wordmark { font-size: 18px; }
+  /* The artwork panel goes full width rather than shrinking — on a phone the
+     picture is most of why you opened this tab. */
+  .dex-art-frame { width: 100%; height: 220px; }
+  .dex-name { font-size: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

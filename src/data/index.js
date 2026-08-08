@@ -67,7 +67,68 @@ try {
 // fresh clone the two lists are identical.
 const MOVES = ALL_MOVES.filter((m) => m.power != null && m.category !== "status");
 
-export { POKEDEX, MOVES, ALL_MOVES, usingFullDex };
+/**
+ * The descriptive layer the Pokédex tab reads: the bio, the vital statistics,
+ * the evolution chains and every ability's real name and description. Baked by
+ * `npm run refresh-species`, optional like the rest — without it the Pokédex
+ * still shows types, stats, matchups and moves, just no bio.
+ */
+let SPECIES = {};
+let CHAINS = {};
+let ABILITY_INFO = {};
+let usingSpeciesData = false;
+
+try {
+  const file = Object.values(
+    import.meta.glob("./species.json", { eager: true, import: "default" })
+  )[0];
+  if (file?.species) {
+    SPECIES = file.species;
+    CHAINS = file.chains ?? {};
+    usingSpeciesData = true;
+  }
+  const abilities = Object.values(
+    import.meta.glob("./abilities.json", { eager: true, import: "default" })
+  )[0];
+  if (abilities) ABILITY_INFO = abilities;
+} catch {
+  // Not baked yet — the Pokédex degrades to what pokedex.json already knows.
+}
+
+/**
+ * Official artwork — the big painted picture, not the 96px sprite. Same repo
+ * the sprites already come from. Kept in step with ART_BASE in
+ * scripts/build-species.mjs, which asserts against the live URL at bake time.
+ * `art` is false where PokéAPI has no artwork, and the sprite stands in.
+ */
+const ART_BASE =
+  "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork";
+
+export { POKEDEX, MOVES, ALL_MOVES, usingFullDex, usingSpeciesData };
+
+/** Everything species.json knows about one Pokémon, or null. */
+export const speciesOf = (pokemon) => (pokemon ? SPECIES[pokemon.id] ?? null : null);
+
+/** The evolution line a Pokémon belongs to, oldest stage first. [] if unknown. */
+export const chainOf = (pokemon) => {
+  const chain = speciesOf(pokemon)?.chain;
+  return chain != null ? CHAINS[chain] ?? [] : [];
+};
+
+/** A big picture if there is one, the battle sprite if there isn't. */
+export const artworkFor = (pokemon) =>
+  speciesOf(pokemon)?.art ? `${ART_BASE}/${pokemon.id}.png` : pokemon?.sprite ?? null;
+
+/**
+ * An ability's real name and in-game description. Falls back to un-slugifying
+ * the name so an unbaked clone shows "Solar Power" rather than
+ * "solar-power" — but never invents a description.
+ */
+export const abilityInfo = (slug) =>
+  ABILITY_INFO[slug] ?? {
+    name: slug.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+    desc: null,
+  };
 
 export const byId = (id) => POKEDEX.find((p) => p.id === id);
 export const moveByName = (name) => ALL_MOVES.find((m) => m.name === name);
