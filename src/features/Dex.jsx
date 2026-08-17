@@ -54,11 +54,15 @@ export default function Dex({ focus = null }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 16 }}>
+        {/* Arrows first, picker second. The picker is as wide as the name in it,
+            so with the arrows on the right they shifted every time you stepped
+            from a Mew to a Charizard — moving the button out from under the
+            finger that just pressed it. On the left they never move. */}
+        <button className="btn ghost" onClick={() => step(-1)} aria-label="Previous Pokémon">◀</button>
+        <button className="btn ghost" onClick={() => step(1)} aria-label="Next Pokémon">▶</button>
         <Field label="Pokémon">
           <PokemonSelect list={POKEDEX} value={id} onChange={setId} />
         </Field>
-        <button className="btn ghost" onClick={() => step(-1)} aria-label="Previous Pokémon">◀</button>
-        <button className="btn ghost" onClick={() => step(1)} aria-label="Next Pokémon">▶</button>
       </div>
 
       <Hero pokemon={pokemon} species={species} />

@@ -19,6 +19,18 @@
 
 export const CHANGELOG = [
   {
+    date: "2026-08-17",
+    title: "The Pokédex arrows stay put",
+    credit: "Spotted by Joseph",
+    intro:
+      "The ◀ and ▶ arrows on the Pokédex used to jump sideways every time you " +
+      "pressed one, because the name box next to them changed width with the " +
+      "name. They've moved to the left of the name box, so now they stay still.",
+    changes: [
+      { kind: "fix", text: "The ◀ and ▶ arrows on the Pokédex don't move any more. Going from Mew to Charizard used to slide them along, so the arrow was never quite where you left your finger. You can hold your place and tap through the whole dex now." },
+    ],
+  },
+  {
     date: "2026-08-08",
     title: "A proper Pokédex",
     credit: "Suggested by Joseph",
